@@ -214,6 +214,21 @@ CHECKPOINT_FIELDS = {
 }
 
 
+# These populated legacy Artifact Index properties must remain in Notion. They
+# are outside the V1 Gateway contract: schema preflight permits them, while all
+# Gateway encode/decode paths continue to ignore them so existing values are
+# never read, written, or cleared by this service.
+PRESERVED_EXTRA_FIELDS: dict[str, frozenset[str]] = {
+    "artifact": frozenset(
+        {
+            "confirmed_by_actor_id",
+            "review_confirmation_event_id",
+            "source_stage",
+        }
+    ),
+}
+
+
 SELECT_OPTIONS: dict[tuple[str, str], set[str]] = {
     ("events", "event_type"): {
         "application_created", "expert_profile_updated", "esm_owner_transferred",
@@ -556,9 +571,14 @@ def validate_schema(
                 f"table={kind} properties_object_missing=true"
             ),
         )
-    if set(properties) != set(expected_fields):
-        missing_fields = sorted(set(expected_fields) - set(properties))
-        unexpected_fields = sorted(set(properties) - set(expected_fields))
+    actual_fields = set(properties)
+    required_fields = set(expected_fields)
+    preserved_extra_fields = set(PRESERVED_EXTRA_FIELDS.get(kind, frozenset()))
+    missing_fields = sorted(required_fields - actual_fields)
+    unexpected_fields = sorted(
+        actual_fields - required_fields - preserved_extra_fields
+    )
+    if missing_fields or unexpected_fields:
         raise ConfigurationError(
             "NOTION_SCHEMA_FIELD_MISMATCH",
             (
