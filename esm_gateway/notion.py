@@ -253,10 +253,13 @@ SELECT_OPTIONS: dict[tuple[str, str], set[str]] = {
     ("events", "actor_type"): {"esm", "agent", "system", "admin", "integration"},
     ("state", "source"): {"inbound", "esm_outbound"},
     ("state", "professional_domains"): {
-        "marketing", "sales", "product", "operations", "people_hr", "finance",
+        "marketing", "sales", "gtm", "international_trade", "cross_border_ecommerce",
+        "product", "operations", "people_hr", "finance",
         "legal", "healthcare", "technology", "education", "creator_economy", "other",
     },
-    ("state", "market_regions"): {"na", "latam", "emea", "apac", "global", "other"},
+    ("state", "market_regions"): {
+        "na", "latam", "emea", "apac", "china_mainland", "global", "other",
+    },
     ("state", "current_stage"): {
         "sourcing", "evaluation", "initial_outreach", "discovery_call",
         "agent_positioning", "onboarding_handoff",

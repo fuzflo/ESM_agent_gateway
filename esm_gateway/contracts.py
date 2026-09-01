@@ -55,6 +55,9 @@ PROFESSIONAL_DOMAIN_VALUES = frozenset(
     {
         "marketing",
         "sales",
+        "gtm",
+        "international_trade",
+        "cross_border_ecommerce",
         "product",
         "operations",
         "people_hr",
@@ -67,7 +70,9 @@ PROFESSIONAL_DOMAIN_VALUES = frozenset(
         "other",
     }
 )
-MARKET_REGION_VALUES = frozenset({"na", "latam", "emea", "apac", "global", "other"})
+MARKET_REGION_VALUES = frozenset(
+    {"na", "latam", "emea", "apac", "china_mainland", "global", "other"}
+)
 OUTREACH_CHANNELS = frozenset(
     {"email", "linkedin", "x", "whatsapp", "wechat", "phone", "other"}
 )
