@@ -38,7 +38,7 @@ from esm_gateway.service import ESMGatewayService
 from esm_gateway.util import utc_text
 
 
-GATEWAY_VERSION = "1.0.1"
+GATEWAY_VERSION = "1.1.0"
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp")
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")  # noqa: S104
 PUBLIC_PATHS = frozenset({"/", "/healthz"})
@@ -246,11 +246,11 @@ class StrictESMMCPServer(MCPServer):
 
 
 mcp = StrictESMMCPServer(
-    name="esm-agent-v1-gateway",
-    title="ESM Agent V1 Gateway",
+    name="esm-agent-v1-1-gateway",
+    title="ESM Agent V1.1 Gateway",
     version=GATEWAY_VERSION,
     instructions=(
-        "One controlled ESM V1 endpoint. Verify the test code first and wait for "
+        "One controlled ESM V1.1 endpoint. Verify the test code first and wait for "
         "ESM_IDENTITY_VERIFIED before any snapshot or write tool. Formal writes always "
         "use prepare_write followed by the user's exact confirmation and confirm_write."
     ),
@@ -312,13 +312,15 @@ async def prepare_write(
         dict[str, Any],
         Field(
             description=(
-                "A closed V1 command object; unknown command fields are rejected. "
+                "A closed V1.1 command object; unknown command fields are rejected. "
                 "For batch commands, professional_domains must use one or more of "
-                "marketing, sales, product, operations, people_hr, finance, legal, "
-                "healthcare, technology, education, creator_economy, other; "
-                "market_regions must use one or more of na, latam, emea, apac, global, "
-                "other. Map SEO to marketing and Mainland China to apac; never send "
-                "human-facing translated labels as enum values."
+                "marketing, sales, gtm, international_trade, cross_border_ecommerce, "
+                "product, operations, people_hr, finance, legal, healthcare, technology, "
+                "education, creator_economy, other; market_regions must use one or more "
+                "of na, latam, emea, apac, china_mainland, global, other. Map SEO to "
+                "marketing, GTM to gtm, foreign trade to international_trade, cross-border "
+                "e-commerce to cross_border_ecommerce, and Mainland China to "
+                "china_mainland; never send human-facing translated labels as enum values."
             )
         ),
     ],
@@ -354,7 +356,7 @@ async def confirm_write(
 @mcp.custom_route("/", methods=["GET"])
 async def root(request: Request) -> PlainTextResponse:
     return PlainTextResponse(
-        f"ESM Agent V1 Gateway v{GATEWAY_VERSION}\nMCP endpoint: {MCP_PATH}\n"
+        f"ESM Agent V1.1 Gateway v{GATEWAY_VERSION}\nMCP endpoint: {MCP_PATH}\n"
     )
 
 
