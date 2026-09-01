@@ -9,6 +9,8 @@ from typing import Any
 
 from .confirmation import CONFIRMATION_PHRASE, ConfirmationService
 from .contracts import (
+    MARKET_REGION_VALUES,
+    PROFESSIONAL_DOMAIN_VALUES,
     TERMINAL_OUTCOMES,
     Artifact,
     Event,
@@ -363,6 +365,16 @@ class ESMGatewayService:
             source = raw.get("source", "esm_outbound")
             if source not in {"inbound", "esm_outbound"}:
                 raise ContractError("COMMAND_PAYLOAD_INVALID")
+            professional_domains = _frozen_enum_list(
+                raw.get("professional_domains", []),
+                allowed=PROFESSIONAL_DOMAIN_VALUES,
+                field_name="professional_domains",
+            )
+            market_regions = _frozen_enum_list(
+                raw.get("market_regions", []),
+                allowed=MARKET_REGION_VALUES,
+                field_name="market_regions",
+            )
             supplied_temp_id = _optional_text(raw.get("temp_application_id"))
             temp_id = supplied_temp_id or new_temp_application_id()
             if supplied_temp_id and not _is_temp_application_id(supplied_temp_id):
@@ -401,24 +413,29 @@ class ESMGatewayService:
                 owner = identity
                 reason = None
                 entry_path = "standard"
+            created_payload = _application_created_payload(
+                expert_name=expert_name,
+                source=source,
+                professional_domains=professional_domains,
+                market_regions=market_regions,
+                entry_path=entry_path,
+                trusted_entry_reason_short=reason,
+            )
+            validate_event_payload("application_created", created_payload)
+            if profile_url:
+                validate_event_payload(
+                    "expert_profile_updated",
+                    {
+                        "reason": "initial_public_profile_registration",
+                        "primary_public_profile_url": profile_url,
+                    },
+                )
             if existing_events:
                 created = existing_events[0]
-                expected_payload = {
-                    "expert_name": expert_name,
-                    "source": source,
-                    "professional_domains": _string_list(
-                        raw.get("professional_domains", [])
-                    ),
-                    "market_regions": _string_list(raw.get("market_regions", [])),
-                    "entry_path": entry_path,
-                }
-                if entry_path == "trusted_direct":
-                    expected_payload["skipped_stages"] = ["sourcing", "evaluation"]
-                    expected_payload["trusted_entry_reason_short"] = reason
                 if (
                     created.event_type != "application_created"
                     or created.esm_owner_id_at_event_time != owner.esm_owner_id
-                    or created.payload != expected_payload
+                    or created.payload != created_payload
                 ):
                     raise ContractError("TEMP_APPLICATION_ID_ALREADY_IN_USE")
                 warnings.append(f"已提交项将安全回读，不会重复创建：{expert_name}")
@@ -427,8 +444,8 @@ class ESMGatewayService:
                     "temp_application_id": temp_id,
                     "expert_name": expert_name,
                     "source": source,
-                    "professional_domains": _string_list(raw.get("professional_domains", [])),
-                    "market_regions": _string_list(raw.get("market_regions", [])),
+                    "professional_domains": professional_domains,
+                    "market_regions": market_regions,
                     "primary_public_profile_url": profile_url,
                     "entry_path": entry_path,
                     "trusted_entry_reason_short": reason,
@@ -791,18 +808,16 @@ class ESMGatewayService:
         for candidate in command["candidates"]:
             temp_id = candidate["temp_application_id"]
             try:
-                created_payload = {
-                    "expert_name": candidate["expert_name"],
-                    "source": candidate["source"],
-                    "professional_domains": candidate["professional_domains"],
-                    "market_regions": candidate["market_regions"],
-                    "entry_path": candidate["entry_path"],
-                }
-                if candidate["entry_path"] == "trusted_direct":
-                    created_payload["skipped_stages"] = ["sourcing", "evaluation"]
-                    created_payload["trusted_entry_reason_short"] = candidate[
+                created_payload = _application_created_payload(
+                    expert_name=candidate["expert_name"],
+                    source=candidate["source"],
+                    professional_domains=candidate["professional_domains"],
+                    market_regions=candidate["market_regions"],
+                    entry_path=candidate["entry_path"],
+                    trusted_entry_reason_short=candidate[
                         "trusted_entry_reason_short"
-                    ]
+                    ],
+                )
                 existing_events = await self.storage.stream_events(temp_id)
                 if existing_events:
                     event = existing_events[0]
@@ -1117,6 +1132,37 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise ContractError("COMMAND_PAYLOAD_INVALID")
     return [item for item in value if item]
+
+
+def _frozen_enum_list(
+    value: Any, *, allowed: frozenset[str], field_name: str
+) -> list[str]:
+    items = _string_list(value)
+    if not set(items).issubset(allowed):
+        raise ContractError("COMMAND_PAYLOAD_INVALID", f"Invalid {field_name}.")
+    return items
+
+
+def _application_created_payload(
+    *,
+    expert_name: str,
+    source: str,
+    professional_domains: list[str],
+    market_regions: list[str],
+    entry_path: str,
+    trusted_entry_reason_short: str | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "expert_name": expert_name,
+        "source": source,
+        "professional_domains": professional_domains,
+        "market_regions": market_regions,
+        "entry_path": entry_path,
+    }
+    if entry_path == "trusted_direct":
+        payload["skipped_stages"] = ["sourcing", "evaluation"]
+        payload["trusted_entry_reason_short"] = trusted_entry_reason_short
+    return payload
 
 
 def _reject_unknown_fields(value: dict[str, Any], allowed: set[str]) -> None:
