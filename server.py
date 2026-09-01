@@ -38,7 +38,7 @@ from esm_gateway.service import ESMGatewayService
 from esm_gateway.util import utc_text
 
 
-GATEWAY_VERSION = "1.0.0"
+GATEWAY_VERSION = "1.0.1"
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp")
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")  # noqa: S104
 PUBLIC_PATHS = frozenset({"/", "/healthz"})
@@ -310,7 +310,17 @@ async def prepare_write(
     source_session_id: SourceSessionID,
     command: Annotated[
         dict[str, Any],
-        Field(description="A closed V1 command object; unknown command fields are rejected."),
+        Field(
+            description=(
+                "A closed V1 command object; unknown command fields are rejected. "
+                "For batch commands, professional_domains must use one or more of "
+                "marketing, sales, product, operations, people_hr, finance, legal, "
+                "healthcare, technology, education, creator_economy, other; "
+                "market_regions must use one or more of na, latam, emea, apac, global, "
+                "other. Map SEO to marketing and Mainland China to apac; never send "
+                "human-facing translated labels as enum values."
+            )
+        ),
     ],
 ) -> dict[str, Any]:
     """Validate a stable preview and issue one ten-minute write card; does not write."""
