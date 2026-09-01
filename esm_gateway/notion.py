@@ -549,13 +549,36 @@ def validate_schema(
 ) -> None:
     properties = schema.get("properties")
     if not isinstance(properties, dict):
-        raise ConfigurationError("NOTION_SCHEMA_INVALID")
+        raise ConfigurationError(
+            "NOTION_SCHEMA_INVALID",
+            (
+                "NOTION_SCHEMA_INVALID "
+                f"table={kind} properties_object_missing=true"
+            ),
+        )
     if set(properties) != set(expected_fields):
-        raise ConfigurationError("NOTION_SCHEMA_FIELD_MISMATCH")
+        missing_fields = sorted(set(expected_fields) - set(properties))
+        unexpected_fields = sorted(set(properties) - set(expected_fields))
+        raise ConfigurationError(
+            "NOTION_SCHEMA_FIELD_MISMATCH",
+            (
+                "NOTION_SCHEMA_FIELD_MISMATCH "
+                f"table={kind} missing_fields={missing_fields!r} "
+                f"unexpected_fields={unexpected_fields!r}"
+            ),
+        )
     for name, expected_type in expected_fields.items():
         spec = properties.get(name)
         if not isinstance(spec, dict) or spec.get("type") != expected_type:
-            raise ConfigurationError("NOTION_SCHEMA_TYPE_MISMATCH")
+            actual_type = spec.get("type") if isinstance(spec, dict) else None
+            raise ConfigurationError(
+                "NOTION_SCHEMA_TYPE_MISMATCH",
+                (
+                    "NOTION_SCHEMA_TYPE_MISMATCH "
+                    f"table={kind} field={name!r} "
+                    f"expected_type={expected_type!r} actual_type={actual_type!r}"
+                ),
+            )
         expected_options = SELECT_OPTIONS.get((kind, name))
         if expected_options is None:
             continue
@@ -567,7 +590,17 @@ def validate_schema(
             if isinstance(item, dict) and isinstance(item.get("name"), str)
         }
         if actual != expected_options:
-            raise ConfigurationError("NOTION_SCHEMA_ENUM_MISMATCH")
+            missing_options = sorted(expected_options - actual)
+            unexpected_options = sorted(actual - expected_options)
+            raise ConfigurationError(
+                "NOTION_SCHEMA_ENUM_MISMATCH",
+                (
+                    "NOTION_SCHEMA_ENUM_MISMATCH "
+                    f"table={kind} field={name!r} "
+                    f"missing_options={missing_options!r} "
+                    f"unexpected_options={unexpected_options!r}"
+                ),
+            )
 
 
 class NotionStorage:
