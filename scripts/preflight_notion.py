@@ -19,7 +19,17 @@ async def run() -> int:
     try:
         result = await storage_from_environment().preflight()
     except GatewayError as exc:
-        print(json.dumps({"status": "failed", "result_code": exc.result_code}))
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "result_code": exc.result_code,
+                    "details": exc.safe_message,
+                    "writes_performed": False,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 1
     print(
         json.dumps(
