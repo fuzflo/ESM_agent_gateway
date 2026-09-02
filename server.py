@@ -118,7 +118,7 @@ class Runtime:
             worker = ProjectionWorker(
                 storage,
                 poll_interval_seconds=float(
-                    os.environ.get("PROJECTION_POLL_INTERVAL_SECONDS", "1.0")
+                    os.environ.get("PROJECTION_POLL_INTERVAL_SECONDS", "60")
                 ),
             )
             service = ESMGatewayService(
@@ -485,6 +485,7 @@ def logging_config() -> dict[str, Any]:
             },
         },
         "loggers": {
+            "httpx": {"handlers": ["stdout"], "level": "WARNING", "propagate": False},
             "uvicorn": {"handlers": ["stdout"], "level": level, "propagate": False},
             "uvicorn.error": {"handlers": ["stdout"], "level": level, "propagate": False},
             "uvicorn.access": {"handlers": ["access_stdout"], "level": level, "propagate": False},

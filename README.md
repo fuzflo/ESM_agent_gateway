@@ -1,6 +1,6 @@
-# ESM Gateway V1
+# ESM Gateway V1.1
 
-V1 是一个 Railway 服务、一个对外 MCP endpoint：
+V1.1 是 V1 的向后兼容合同修订版，保持一个 Railway 服务、一个对外 MCP endpoint：
 
 ```text
 Leapility ESM Agent
@@ -30,6 +30,8 @@ confirm_write               # append/readback; projection remains asynchronous
 
 每个工具都拒绝未知外层参数；Gateway 服务层还会拒绝 command、candidate 和 Artifact 的未知字段。
 
+`prepare_write` 必须在签发确认卡前验证将来真正写入的 Event payload，包括冻结的 `professional_domains` / `market_regions` 枚举与公开链接格式。已签发的确认卡不应因可预先检测的 payload 错误到 `confirm_write` 时才失败。
+
 ## 身份映射
 
 10 位 ESM 共用一个 Railway 环境变量 `ESM_IDENTITY_MAP_JSON`，而不是 10 个环境变量。JSON 的 key 是每人当前唯一测试码，value 是：
@@ -44,6 +46,17 @@ confirm_write               # append/readback; projection remains asynchronous
 
 启动时必须精确有 1 个 `admin` 和 9 个 `esm`，ID 必须唯一。单人同时只有一个有效测试码，V1 不支持新旧码重叠轮换。
 
+## V1.1 枚举扩充
+
+V1.1 在保留 V1 全部枚举的基础上新增：
+
+```text
+professional_domains: gtm | international_trade | cross_border_ecommerce
+market_regions: china_mainland
+```
+
+部署前必须先在 Notion ExpertState 对应 multi-select 属性中增加这四个精确小写选项，再立即部署 Gateway V1.1。当前 V1 的 schema preflight 使用精确枚举集合；如果在添加 Notion 选项后重启旧 V1，它会因 schema 漂移拒绝启动，因此应在受控维护窗口连续完成 Notion 变更和 V1.1 部署。
+
 ## Notion 边界
 
 - 真实四表作为空库启动，不使用虚拟或 sandbox 数据库。
@@ -55,14 +68,23 @@ confirm_write               # append/readback; projection remains asynchronous
 - 只有 Event、所需 Artifact 和 ExpertState 都能一致回读时，上层 Agent 才能对 ESM 称为“完整成功”；`WRITE_COMMITTED_PROJECTION_PENDING` 不得说成写入失败，也不得重复提交 Event。
 - Feishu 链接只作为人工存档地址，Gateway 不打开、不读取正文。
 
+## Projection Worker 调度
+
+- `PROJECTION_POLL_INTERVAL_SECONDS` 生产默认值为 `60`。这是无通知或进程外写入时的兜底轮询间隔，不是正常 Gateway 写入的投影延迟。
+- Gateway 每次成功追加 Event 后调用 `projector.notify()`，同进程 Worker 会立即醒来，不等待下一次 60 秒轮询。
+- Worker 启动后先立即执行一次扫描，再进入空闲等待；因此重启恢复已有积压 Event 也不等待 60 秒。
+- Worker 在启动时从持久化 Checkpoint 读取一次当前位置，运行期间在内存中缓存已成功提交的位置。只有 `set_checkpoint` 成功后才推进内存缓存；失败时保持原位置并在后续扫描中安全重试。
+- 成功的底层 `httpx` 请求不写入 INFO 日志；Gateway 工具、Worker started/completed 和失败日志仍保留。需要临时排查 provider 请求时可单独提高 `httpx` logger 级别。
+- `projection_worker_started` 会记录实际生效的轮询秒数和 batch size，部署后可据此确认 Railway 环境变量没有继续覆盖为旧值。
+
 ## 单副本约束
 
-V1 Railway 必须配置为单副本。进程内锁保证同时 Event 写入的 `global_sequence` 和 stream version 串行；重启时从 Events 已有最高 sequence 恢复。V1 不支持多 Railway replica，也不支持同一 ESM 两个对话并发修改同一专家。
+V1.1 Railway 必须配置为单副本。进程内锁保证同时 Event 写入的 `global_sequence` 和 stream version 串行；重启时从 Events 已有最高 sequence 恢复。V1.1 不支持多 Railway replica，也不支持同一 ESM 两个对话并发修改同一专家。
 
 ## 本地验证
 
 ```bash
-python3 -m unittest discover -s ../tests_v1 -v
+python3 -m unittest discover -s tests -v
 python3 scripts/preflight_notion.py
 ```
 
@@ -70,10 +92,10 @@ python3 scripts/preflight_notion.py
 
 ## Railway
 
-1. 以 `esm-gateway-v1` 为服务根目录。
+1. 以 `esm-gateway-v1.1` 为服务根目录。
 2. 根据 `.env.example` 配置受保护变量。不需要、也不得添加“写入开关”。
 3. 配置单 replica。
 4. `Procfile` 启动 `python server.py`。
 5. Leapility 只配置一个 MCP：`https://<railway-host>/mcp`，Bearer token 使用 `GATEWAY_TOKEN`。
 
-日志全部输出 stdout。正常 Gateway started/completed 和 Uvicorn 启动信息为 info；身份拒绝为 info；可恢复合同/权限问题为 warning；provider 和真实未处理异常为 error。`Terminating session: None` 被过滤。
+日志全部输出 stdout。正常 Gateway started/completed、Worker started/completed 和 Uvicorn 启动信息为 info；成功的 `httpx` provider 请求从 INFO 降噪，身份拒绝为 info；可恢复合同/权限问题为 warning；provider 和真实未处理异常为 error。`Terminating session: None` 被过滤。
