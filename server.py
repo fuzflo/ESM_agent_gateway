@@ -38,7 +38,7 @@ from esm_gateway.service import ESMGatewayService
 from esm_gateway.util import utc_text
 
 
-GATEWAY_VERSION = "1.1.1"
+GATEWAY_VERSION = "1.1.2"
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp")
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")  # noqa: S104
 PUBLIC_PATHS = frozenset({"/", "/healthz"})
