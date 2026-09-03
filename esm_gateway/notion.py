@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from copy import deepcopy
 from typing import Any
@@ -23,8 +24,13 @@ from .util import canonical_json, new_id, sha256_value, utc_text
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = os.environ.get("NOTION_VERSION", "2026-03-11")
 NOTION_TIMEOUT_SECONDS = 15.0
+NOTION_READ_RETRY_ATTEMPTS = 3
+NOTION_READ_RETRY_BASE_DELAY_SECONDS = 0.5
 PROJECTION_VERSION = "1.1.0"
 CHECKPOINT_ID = "esm-v1-projector:all"
+
+
+logger = logging.getLogger("esm-gateway.notion")
 
 
 EVENT_FIELDS = {
@@ -471,20 +477,32 @@ class NotionClient:
             "Content-Type": "application/json",
             "Notion-Version": NOTION_VERSION,
         }
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(NOTION_TIMEOUT_SECONDS, connect=5.0)
-            ) as client:
-                response = await client.request(
-                    method,
-                    f"{NOTION_API_BASE}{path}",
-                    headers=headers,
-                    json=body,
+        attempts = 1 if write else NOTION_READ_RETRY_ATTEMPTS
+        for attempt in range(1, attempts + 1):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(NOTION_TIMEOUT_SECONDS, connect=5.0)
+                ) as client:
+                    response = await client.request(
+                        method,
+                        f"{NOTION_API_BASE}{path}",
+                        headers=headers,
+                        json=body,
+                    )
+                break
+            except Exception as exc:
+                if attempt >= attempts:
+                    raise PersistenceError(
+                        "NOTION_REQUEST_FAILED", write_may_have_succeeded=write
+                    ) from exc
+                logger.warning(
+                    "notion_read_request_retry attempt=%s max_attempts=%s",
+                    attempt,
+                    attempts,
                 )
-        except Exception as exc:
-            raise PersistenceError(
-                "NOTION_REQUEST_FAILED", write_may_have_succeeded=write
-            ) from exc
+                await asyncio.sleep(
+                    NOTION_READ_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+                )
         if response.status_code < 200 or response.status_code >= 300:
             raise PersistenceError(
                 "NOTION_REQUEST_REJECTED", write_may_have_succeeded=write
