@@ -1028,13 +1028,18 @@ class ESMGatewayService:
         return event
 
     async def _wait_for_projection(self, temp_id: str, event_id: str) -> bool:
+        state = await self.storage.get_state(temp_id)
+        if state is not None and state.last_applied_event_id == event_id:
+            return True
+        if self.projection_wait_seconds <= 0:
+            return False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.projection_wait_seconds
         while loop.time() < deadline:
+            await asyncio.sleep(0.05)
             state = await self.storage.get_state(temp_id)
             if state is not None and state.last_applied_event_id == event_id:
                 return True
-            await asyncio.sleep(0.05)
         return False
 
     def _require_identity(self, raw_code: str) -> Identity:

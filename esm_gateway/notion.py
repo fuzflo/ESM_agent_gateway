@@ -26,7 +26,6 @@ NOTION_VERSION = os.environ.get("NOTION_VERSION", "2026-03-11")
 NOTION_TIMEOUT_SECONDS = 15.0
 NOTION_READ_RETRY_ATTEMPTS = 3
 NOTION_READ_RETRY_BASE_DELAY_SECONDS = 0.5
-EVENT_READBACK_DELAYS_SECONDS = (0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0)
 PROJECTION_VERSION = "1.1.0"
 CHECKPOINT_ID = "esm-v1-projector:all"
 
@@ -756,39 +755,21 @@ class NotionStorage:
                 raise PersistenceError(
                     "NOTION_RESPONSE_INVALID", write_may_have_succeeded=True
                 )
-            readback: Event | None = None
-            for attempt, delay_seconds in enumerate(
-                EVENT_READBACK_DELAYS_SECONDS, start=1
-            ):
-                if delay_seconds:
-                    await asyncio.sleep(delay_seconds)
-                try:
-                    readback = _decode_event(
-                        await self.event_reader.retrieve_page(page_id)
-                    )
-                except PersistenceError:
-                    readback = None
-                if readback == event:
-                    break
-                logger.warning(
-                    "notion_event_readback_retry attempt=%s max_attempts=%s",
-                    attempt,
-                    len(EVENT_READBACK_DELAYS_SECONDS),
-                )
-            if readback != event:
-                # A final indexed query covers providers that briefly reject direct
-                # Reader access to a page immediately after Writer creation.
-                try:
-                    readback = await self._find_event_by_event_id(event.event_id)
-                except PersistenceError as exc:
-                    raise PersistenceError(
-                        "EVENT_READBACK_FAILED", write_may_have_succeeded=True
-                    ) from exc
-            if readback != event:
+            try:
+                acknowledged_event = _decode_event(created_page)
+            except PersistenceError as exc:
                 raise PersistenceError(
-                    "EVENT_READBACK_FAILED", write_may_have_succeeded=True
+                    "EVENT_WRITE_ACK_INVALID", write_may_have_succeeded=True
+                ) from exc
+            if acknowledged_event != event:
+                raise PersistenceError(
+                    "EVENT_WRITE_ACK_MISMATCH", write_may_have_succeeded=True
                 )
-            return readback, True
+            # The successful Writer response is the commit acknowledgement. The
+            # independently authorised Reader can remain eventually consistent for
+            # tens of seconds, so Reader visibility belongs to the async projector
+            # path and must not turn a committed Event into a failed confirmation.
+            return acknowledged_event, True
 
     async def _find_event_by_event_id(self, event_id: str) -> Event | None:
         pages = await self.event_reader.query(
