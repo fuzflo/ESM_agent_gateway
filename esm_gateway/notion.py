@@ -26,6 +26,7 @@ NOTION_VERSION = os.environ.get("NOTION_VERSION", "2026-03-11")
 NOTION_TIMEOUT_SECONDS = 15.0
 NOTION_READ_RETRY_ATTEMPTS = 3
 NOTION_READ_RETRY_BASE_DELAY_SECONDS = 0.5
+EVENT_READBACK_DELAYS_SECONDS = (0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0)
 PROJECTION_VERSION = "1.1.0"
 CHECKPOINT_ID = "esm-v1-projector:all"
 
@@ -520,6 +521,9 @@ class NotionClient:
     async def schema(self, data_source_id: str) -> dict[str, Any]:
         return await self.request("GET", f"/data_sources/{data_source_id}")
 
+    async def retrieve_page(self, page_id: str) -> dict[str, Any]:
+        return await self.request("GET", f"/pages/{page_id}")
+
     async def query(
         self,
         data_source_id: str,
@@ -743,16 +747,43 @@ class NotionStorage:
             values = event.as_record()
             values["application_id"] = None
             values["esm_owner_user_at_event_time"] = []
-            await self.event_writer.create_page(
+            created_page = await self.event_writer.create_page(
                 self.events_id, encode_values(EVENT_FIELDS, values)
             )
             self._next_sequence = sequence + 1
+            page_id = created_page.get("id")
+            if not isinstance(page_id, str) or not page_id:
+                raise PersistenceError(
+                    "NOTION_RESPONSE_INVALID", write_may_have_succeeded=True
+                )
             readback: Event | None = None
-            for _attempt in range(3):
-                readback = await self._find_event_by_event_id(event.event_id)
-                if readback is not None:
+            for attempt, delay_seconds in enumerate(
+                EVENT_READBACK_DELAYS_SECONDS, start=1
+            ):
+                if delay_seconds:
+                    await asyncio.sleep(delay_seconds)
+                try:
+                    readback = _decode_event(
+                        await self.event_reader.retrieve_page(page_id)
+                    )
+                except PersistenceError:
+                    readback = None
+                if readback == event:
                     break
-                await asyncio.sleep(0.1)
+                logger.warning(
+                    "notion_event_readback_retry attempt=%s max_attempts=%s",
+                    attempt,
+                    len(EVENT_READBACK_DELAYS_SECONDS),
+                )
+            if readback != event:
+                # A final indexed query covers providers that briefly reject direct
+                # Reader access to a page immediately after Writer creation.
+                try:
+                    readback = await self._find_event_by_event_id(event.event_id)
+                except PersistenceError as exc:
+                    raise PersistenceError(
+                        "EVENT_READBACK_FAILED", write_may_have_succeeded=True
+                    ) from exc
             if readback != event:
                 raise PersistenceError(
                     "EVENT_READBACK_FAILED", write_may_have_succeeded=True
