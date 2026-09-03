@@ -38,7 +38,7 @@ from esm_gateway.service import ESMGatewayService
 from esm_gateway.util import utc_text
 
 
-GATEWAY_VERSION = "1.1.0"
+GATEWAY_VERSION = "1.1.1"
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp")
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")  # noqa: S104
 PUBLIC_PATHS = frozenset({"/", "/healthz"})
@@ -119,6 +119,9 @@ class Runtime:
                 storage,
                 poll_interval_seconds=float(
                     os.environ.get("PROJECTION_POLL_INTERVAL_SECONDS", "60")
+                ),
+                retry_delay_seconds=float(
+                    os.environ.get("PROJECTION_RETRY_DELAY_SECONDS", "5")
                 ),
             )
             service = ESMGatewayService(
@@ -362,16 +365,39 @@ async def root(request: Request) -> PlainTextResponse:
 
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(request: Request) -> JSONResponse:
+    runtime_started = runtime.service is not None
+    schema_preflight_valid = runtime.schema_status is not None
+    worker_status = (
+        runtime.worker.health_status()
+        if runtime.worker is not None
+        else {
+            "projection_worker_running": False,
+            "projection_worker_task_done": None,
+            "projection_last_poll_at": None,
+            "projection_last_successful_poll_at": None,
+            "projection_last_error_at": None,
+            "projection_last_error_code": None,
+            "projection_checkpoint_cached": None,
+        }
+    )
+    configured = runtime_configuration_present()
+    healthy = (
+        configured
+        and runtime_started
+        and schema_preflight_valid
+        and bool(worker_status["projection_worker_running"])
+    )
     return JSONResponse(
         {
-            "status": "ok" if runtime_configuration_present() else "misconfigured",
+            "status": "ok" if healthy else "misconfigured" if not configured else "degraded",
             "gateway_version": GATEWAY_VERSION,
             "server_time_utc": utc_text(),
             "gateway_token_configured": bool(gateway_token()),
-            "runtime_configuration_present": runtime_configuration_present(),
-            "runtime_started": runtime.service is not None,
-            "schema_preflight_valid": runtime.schema_status is not None,
+            "runtime_configuration_present": configured,
+            "runtime_started": runtime_started,
+            "schema_preflight_valid": schema_preflight_valid,
             "mcp_endpoint": MCP_PATH,
+            **worker_status,
         }
     )
 
