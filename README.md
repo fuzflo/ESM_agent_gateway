@@ -74,8 +74,13 @@ market_regions: china_mainland
 - Gateway 每次成功追加 Event 后调用 `projector.notify()`，同进程 Worker 会立即醒来，不等待下一次 60 秒轮询。
 - Worker 启动后先立即执行一次扫描，再进入空闲等待；因此重启恢复已有积压 Event 也不等待 60 秒。
 - Worker 在启动时从持久化 Checkpoint 读取一次当前位置，运行期间在内存中缓存已成功提交的位置。只有 `set_checkpoint` 成功后才推进内存缓存；失败时保持原位置并在后续扫描中安全重试。
+- Worker 在 Checkpoint 读取、Event 扫描或单 Event 投影出现临时错误时不会终止后台 task。它记录错误、清除内存 Checkpoint 缓存，默认退避 5 秒后从持久化 Checkpoint 继续。
+- Notion 只读请求的传输层失败默认最多尝试 3 次；写请求不盲目自动重试，仍依靠幂等 key 和回读确认。
+- Event Writer 创建成功后，Gateway 使用返回的 Notion page ID 通过独立 Event Reader 直接回读，并以最长约 7 秒的退避窗口等待 Reader 可见；最后再以 `event_id` 索引查询兜底。
+- `PROJECTION_RETRY_DELAY_SECONDS` 生产默认值为 `5`，用于 Worker 失败后的退避，避免 provider 故障时快速重试。
 - 成功的底层 `httpx` 请求不写入 INFO 日志；Gateway 工具、Worker started/completed 和失败日志仍保留。需要临时排查 provider 请求时可单独提高 `httpx` logger 级别。
 - `projection_worker_started` 会记录实际生效的轮询秒数和 batch size，部署后可据此确认 Railway 环境变量没有继续覆盖为旧值。
+- `/healthz` 同时返回 Worker 是否存活、最后轮询/成功/失败时间、最后错误码和内存 Checkpoint。Worker 不存活时健康状态为 `degraded`。
 
 ## 单副本约束
 
