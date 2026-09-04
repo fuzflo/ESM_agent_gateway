@@ -38,7 +38,7 @@ from esm_gateway.service import ESMGatewayService
 from esm_gateway.util import utc_text
 
 
-GATEWAY_VERSION = "1.1.2"
+GATEWAY_VERSION = "1.1.4"
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp")
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")  # noqa: S104
 PUBLIC_PATHS = frozenset({"/", "/healthz"})
@@ -124,19 +124,24 @@ class Runtime:
                     os.environ.get("PROJECTION_RETRY_DELAY_SECONDS", "5")
                 ),
             )
+            projection_wait_seconds = float(
+                os.environ.get("PROJECTION_READBACK_WAIT_SECONDS", "90")
+            )
             service = ESMGatewayService(
                 identities=identities,
                 confirmations=ConfirmationService(signing_key),
                 storage=storage,
                 projector=worker,
-                projection_wait_seconds=float(
-                    os.environ.get("PROJECTION_READBACK_WAIT_SECONDS", "0")
-                ),
+                projection_wait_seconds=projection_wait_seconds,
             )
             worker.start()
             self.worker = worker
             self.service = service
-            logger.info("gateway_runtime_started schema_preflight=valid")
+            logger.info(
+                "gateway_runtime_started schema_preflight=valid "
+                "projection_readback_wait_seconds=%s",
+                projection_wait_seconds,
+            )
             return service
 
     async def stop(self) -> None:
