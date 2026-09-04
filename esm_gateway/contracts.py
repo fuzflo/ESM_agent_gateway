@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -601,10 +602,15 @@ class Artifact:
             raise ContractError("ARTIFACT_OBJECT_ID_UNSUPPORTED_V1")
         if self.artifact_schema_version != "1.1.0":
             raise ContractError("ARTIFACT_SCHEMA_VERSION_UNSUPPORTED")
-        if self.version_role == "ai_draft" and (
-            not self.source_execution_id or not self.source_result_hash
-        ):
-            raise ContractError("ARTIFACT_SOURCE_BINDING_REQUIRED")
+        if self.version_role == "ai_draft":
+            has_source_execution_id = bool(self.source_execution_id)
+            has_source_result_hash = bool(self.source_result_hash)
+            if has_source_execution_id != has_source_result_hash:
+                raise ContractError("ARTIFACT_SOURCE_BINDING_INCOMPLETE")
+            if self.source_result_hash and re.fullmatch(
+                r"sha256:[0-9a-f]{64}", self.source_result_hash
+            ) is None:
+                raise ContractError("ARTIFACT_SOURCE_HASH_INVALID")
         if self.version_role == "reviewed_final" and not self.source_execution_id:
             raise ContractError("ARTIFACT_SOURCE_BINDING_REQUIRED")
         if self.readable_content_descriptor is not None and len(self.readable_content_descriptor) > 280:
