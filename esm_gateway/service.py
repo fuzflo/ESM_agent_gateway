@@ -114,7 +114,7 @@ class ESMGatewayService:
         confirmations: ConfirmationService,
         storage: Storage,
         projector: ProjectionWorker,
-        projection_wait_seconds: float = 0,
+        projection_wait_seconds: float = 90,
     ) -> None:
         self.identities = identities
         self.confirmations = confirmations
@@ -805,6 +805,7 @@ class ESMGatewayService:
     ) -> dict[str, Any]:
         command = claims["command"]
         results: list[dict[str, Any]] = []
+        pending_projection_checks: list[tuple[int, str, str]] = []
         for candidate in command["candidates"]:
             temp_id = candidate["temp_application_id"]
             try:
@@ -869,15 +870,17 @@ class ESMGatewayService:
                             idempotency_scope=command["batch_id"],
                         )
                 self.projector.notify()
-                projected = await self._wait_for_projection(temp_id, last_event.event_id)
                 results.append(
                     {
                         "expert_name": candidate["expert_name"],
                         "temp_application_id": temp_id,
-                        "status": "success" if projected else "projection_pending",
-                        "result_code": "WRITE_COMPLETED" if projected else "WRITE_COMMITTED_PROJECTION_PENDING",
+                        "status": "projection_pending",
+                        "result_code": "WRITE_COMMITTED_PROJECTION_PENDING",
                         "event_id": last_event.event_id,
                     }
+                )
+                pending_projection_checks.append(
+                    (len(results) - 1, temp_id, last_event.event_id)
                 )
             except GatewayError as exc:
                 results.append(
@@ -888,6 +891,19 @@ class ESMGatewayService:
                         "result_code": exc.result_code,
                     }
                 )
+        if pending_projection_checks:
+            projected_items = await asyncio.gather(
+                *(
+                    self._wait_for_projection(temp_id, event_id)
+                    for _index, temp_id, event_id in pending_projection_checks
+                )
+            )
+            for (index, _temp_id, _event_id), projected in zip(
+                pending_projection_checks, projected_items, strict=True
+            ):
+                if projected:
+                    results[index]["status"] = "success"
+                    results[index]["result_code"] = "WRITE_COMPLETED"
         succeeded = sum(item["status"] in {"success", "projection_pending"} for item in results)
         has_pending = any(item["status"] == "projection_pending" for item in results)
         if succeeded != len(results):
@@ -1028,18 +1044,31 @@ class ESMGatewayService:
         return event
 
     async def _wait_for_projection(self, temp_id: str, event_id: str) -> bool:
-        state = await self.storage.get_state(temp_id)
+        try:
+            state = await self.storage.get_state(temp_id)
+        except GatewayError:
+            state = None
         if state is not None and state.last_applied_event_id == event_id:
             return True
         if self.projection_wait_seconds <= 0:
             return False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.projection_wait_seconds
+        retry_delay_seconds = 0.05
         while loop.time() < deadline:
-            await asyncio.sleep(0.05)
-            state = await self.storage.get_state(temp_id)
+            # A notify can race ahead of Notion's cross-token visibility. Wake the
+            # Worker again with bounded exponential backoff while also checking the
+            # independently stored ExpertState projection.
+            self.projector.notify()
+            remaining_seconds = deadline - loop.time()
+            await asyncio.sleep(min(retry_delay_seconds, remaining_seconds))
+            try:
+                state = await self.storage.get_state(temp_id)
+            except GatewayError:
+                state = None
             if state is not None and state.last_applied_event_id == event_id:
                 return True
+            retry_delay_seconds = min(retry_delay_seconds * 2, 5.0)
         return False
 
     def _require_identity(self, raw_code: str) -> Identity:

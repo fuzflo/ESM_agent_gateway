@@ -755,21 +755,12 @@ class NotionStorage:
                 raise PersistenceError(
                     "NOTION_RESPONSE_INVALID", write_may_have_succeeded=True
                 )
-            try:
-                acknowledged_event = _decode_event(created_page)
-            except PersistenceError as exc:
-                raise PersistenceError(
-                    "EVENT_WRITE_ACK_INVALID", write_may_have_succeeded=True
-                ) from exc
-            if acknowledged_event != event:
-                raise PersistenceError(
-                    "EVENT_WRITE_ACK_MISMATCH", write_may_have_succeeded=True
-                )
-            # The successful Writer response is the commit acknowledgement. The
-            # independently authorised Reader can remain eventually consistent for
-            # tens of seconds, so Reader visibility belongs to the async projector
-            # path and must not turn a committed Event into a failed confirmation.
-            return acknowledged_event, True
+            # A 2xx create response with a page ID is Notion's commit
+            # acknowledgement. Some API responses do not immediately contain a
+            # complete, independently decodable property set. The Event Reader and
+            # ExpertState projection are therefore verified by the async Worker and
+            # the bounded projection wait, rather than rejecting a committed write.
+            return event, True
 
     async def _find_event_by_event_id(self, event_id: str) -> Event | None:
         pages = await self.event_reader.query(
