@@ -2,7 +2,7 @@
 
 V1.1 是 V1 的向后兼容合同修订版，保持一个 Railway 服务、一个对外 MCP endpoint：
 
-当前补丁版本为 V1.1.7。Artifact 和 Event 都以 Notion 2xx 创建响应中的非空 page ID 作为提交凭据；Artifact 创建已获得凭据但 Reader 暂时不可见时，Gateway 仍继续追加 Event，并将 Artifact 回读与状态投影分开报告。V1.1.6 的 43 字符 opaque confirmation token 和 V1.1.5 的 AI draft 成对可选规则保持不变。
+当前补丁版本为 V1.1.8。Artifact 回读改用受控的语义比较：UTC 时间表达统一后比较，Notion multi-select 按无序集合比较，其他业务字段仍严格比较。这避免 Notion 对时区、毫秒或选项顺序的标准化被误判为 `ARTIFACT_READBACK_MISMATCH`，真实内容不一致仍会阻断 Event。V1.1.7 的分阶段 commit/readback 回执、V1.1.6 opaque token 和 V1.1.5 AI draft 规则保持不变。
 
 ```text
 Leapility ESM Agent
@@ -67,6 +67,7 @@ market_regions: china_mainland
 - `esm_gateway/notion.py` 对四表所有字段、类型和冻结枚举执行只读 preflight。任何漂移阻止服务启动；代码不修改 schema。
 - 未用字段保留为空，不删除、改名或改类型。
 - Artifact 与 Event 写入都以对应 Notion Writer 的 2xx 创建响应和非空 page ID 作为 commit ack。Notion Reader 可能延迟可见；Artifact 创建获得 ack 后即继续追加 Event，不再用 Artifact 的即时回读作为 Event 写入前置条件。
+- Artifact 回读语义比较仅对 `created_at` / review/check/retention 时间做 ISO-8601 UTC 归一化，并对 `language` / `allowed_purposes` 做无序比较。链接、content hash、Artifact ID、logical ID、版本、Owner 和状态等字段仍严格相等。真实 mismatch 的日志只记录字段名，不记录字段值。
 - 生产默认 `PROJECTION_READBACK_WAIT_SECONDS=90`：`confirm_write` 在 commit ack 后并行等待 Artifact 独立回读与 ExpertState 投影。两者都完成时返回 `WRITE_COMPLETED`；Artifact 仍不可见时返回 `WRITE_COMMITTED_READBACK_PENDING`；仅投影未完成时返回 `WRITE_COMMITTED_PROJECTION_PENDING`。
 - 批量写入全部已提交但仍有投影待处理时，顶层返回 `BATCH_WRITE_COMMITTED_PROJECTION_PENDING`；只有每项投影回读都成功才返回 `BATCH_WRITE_COMPLETED`。失败子集用原 `batch_id` 和原 `temp_application_id` 安全重试。
 - 业务写入结果显式返回 `artifact_commit_acknowledged`、`artifact_readback_succeeded`、`event_commit_acknowledged`、`projection_readback_succeeded` 和 `pending_phases`。存储错误额外返回 `failed_phase`；Agent 不得用 snapshot 中的 `artifact_versions` 推断 Event 已提交。
