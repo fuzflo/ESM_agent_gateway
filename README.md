@@ -2,6 +2,8 @@
 
 V1.1 是 V1 的向后兼容合同修订版，保持一个 Railway 服务、一个对外 MCP endpoint：
 
+当前补丁版本为 V1.1.5。AI draft 的 `source_execution_id` 与 `source_result_hash` 采用成对可选规则：可信生成元数据不可用时允许同时省略；只提供一个或提供格式错误的 SHA-256 时在签发确认卡前拒绝。Gateway 不生成虚假的来源绑定值。
+
 ```text
 Leapility ESM Agent
         |
@@ -25,7 +27,7 @@ verify_esm_test_code
 get_esm_roster              # Admin only
 get_expert_snapshot
 prepare_write               # validate + issue 10-minute card; no write
-confirm_write               # append/readback; projection remains asynchronous
+confirm_write               # append with Writer acknowledgement; projection remains asynchronous
 ```
 
 每个工具都拒绝未知外层参数；Gateway 服务层还会拒绝 command、candidate 和 Artifact 的未知字段。
@@ -62,8 +64,8 @@ market_regions: china_mainland
 - 真实四表作为空库启动，不使用虚拟或 sandbox 数据库。
 - `esm_gateway/notion.py` 对四表所有字段、类型和冻结枚举执行只读 preflight。任何漂移阻止服务启动；代码不修改 schema。
 - 未用字段保留为空，不删除、改名或改类型。
-- Event 写入、Artifact 写入和 ExpertState 投影都做独立回读。
-- 生产默认 `PROJECTION_READBACK_WAIT_SECONDS=0`：`confirm_write` 在 Event/所需 Artifact 持久化并回读后立即返回 `WRITE_COMMITTED_PROJECTION_PENDING`，不在 Web 请求内执行或等待 ExpertState 投影。Worker 完成后，后续 `get_expert_snapshot` 返回最新状态。
+- Event 写入以 Notion Writer 的 2xx 创建响应和非空 page ID 作为提交凭据。Notion 创建响应可能暂时缺少完整 properties，不因此把已提交写入判为失败；Artifact 写入和 ExpertState 投影仍做独立回读。
+- 生产默认 `PROJECTION_READBACK_WAIT_SECONDS=90`：`confirm_write` 在 Event/所需 Artifact 持久化后，最多等待 90 秒回读 ExpertState。期间以最大 5 秒的退避间隔重新唤醒 Worker。如果已观测到对应 `last_applied_event_id`，返回 `WRITE_COMPLETED`；90 秒后仍不可见则返回 `WRITE_COMMITTED_PROJECTION_PENDING`，绝不返回写入失败。
 - 批量写入全部已提交但仍有投影待处理时，顶层返回 `BATCH_WRITE_COMMITTED_PROJECTION_PENDING`；只有每项投影回读都成功才返回 `BATCH_WRITE_COMPLETED`。失败子集用原 `batch_id` 和原 `temp_application_id` 安全重试。
 - 只有 Event、所需 Artifact 和 ExpertState 都能一致回读时，上层 Agent 才能对 ESM 称为“完整成功”；`WRITE_COMMITTED_PROJECTION_PENDING` 不得说成写入失败，也不得重复提交 Event。
 - Feishu 链接只作为人工存档地址，Gateway 不打开、不读取正文。
@@ -76,7 +78,7 @@ market_regions: china_mainland
 - Worker 在启动时从持久化 Checkpoint 读取一次当前位置，运行期间在内存中缓存已成功提交的位置。只有 `set_checkpoint` 成功后才推进内存缓存；失败时保持原位置并在后续扫描中安全重试。
 - Worker 在 Checkpoint 读取、Event 扫描或单 Event 投影出现临时错误时不会终止后台 task。它记录错误、清除内存 Checkpoint 缓存，默认退避 5 秒后从持久化 Checkpoint 继续。
 - Notion 只读请求的传输层失败默认最多尝试 3 次；写请求不盲目自动重试，仍依靠幂等 key 和回读确认。
-- Event Writer 创建成功后，Gateway 使用返回的 Notion page ID 通过独立 Event Reader 直接回读，并以最长约 7 秒的退避窗口等待 Reader 可见；最后再以 `event_id` 索引查询兜底。
+- Event Writer 创建成功后，Gateway 验证响应中的 Notion page ID，然后立即唤醒 Worker。独立 Event Reader 的可见性延迟由 Worker 退避重试处理，不再将已提交 Event 返回为 `EVENT_READBACK_FAILED` 或 `EVENT_WRITE_ACK_INVALID`。
 - `PROJECTION_RETRY_DELAY_SECONDS` 生产默认值为 `5`，用于 Worker 失败后的退避，避免 provider 故障时快速重试。
 - 成功的底层 `httpx` 请求不写入 INFO 日志；Gateway 工具、Worker started/completed 和失败日志仍保留。需要临时排查 provider 请求时可单独提高 `httpx` logger 级别。
 - `projection_worker_started` 会记录实际生效的轮询秒数和 batch size，部署后可据此确认 Railway 环境变量没有继续覆盖为旧值。
@@ -100,7 +102,8 @@ python3 scripts/preflight_notion.py
 1. 以 `esm-gateway-v1.1` 为服务根目录。
 2. 根据 `.env.example` 配置受保护变量。不需要、也不得添加“写入开关”。
 3. 配置单 replica。
-4. `Procfile` 启动 `python server.py`。
-5. Leapility 只配置一个 MCP：`https://<railway-host>/mcp`，Bearer token 使用 `GATEWAY_TOKEN`。
+4. 将 `PROJECTION_READBACK_WAIT_SECONDS` 设为 `90`；如 Railway 中已存在旧值 `0`，必须手动更新，否则它会覆盖代码默认值。
+5. `Procfile` 启动 `python server.py`。
+6. Leapility 只配置一个 MCP：`https://<railway-host>/mcp`，Bearer token 使用 `GATEWAY_TOKEN`。
 
 日志全部输出 stdout。正常 Gateway started/completed、Worker started/completed 和 Uvicorn 启动信息为 info；成功的 `httpx` provider 请求从 INFO 降噪，身份拒绝为 info；可恢复合同/权限问题为 warning；provider 和真实未处理异常为 error。`Terminating session: None` 被过滤。
