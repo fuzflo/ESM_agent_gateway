@@ -38,7 +38,8 @@ from esm_gateway.service import ESMGatewayService
 from esm_gateway.util import utc_text
 
 
-GATEWAY_VERSION = "1.1.5"
+GATEWAY_VERSION = "1.1.6"
+GATEWAY_INSTANCE_ID = str(uuid.uuid4())
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp")
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")  # noqa: S104
 PUBLIC_PATHS = frozenset({"/", "/healthz"})
@@ -138,8 +139,9 @@ class Runtime:
             self.worker = worker
             self.service = service
             logger.info(
-                "gateway_runtime_started schema_preflight=valid "
+                "gateway_runtime_started instance_id=%s schema_preflight=valid "
                 "projection_readback_wait_seconds=%s",
+                GATEWAY_INSTANCE_ID,
                 projection_wait_seconds,
             )
             return service
@@ -149,7 +151,7 @@ class Runtime:
             await self.worker.stop()
         self.worker = None
         self.service = None
-        logger.info("gateway_runtime_stopped")
+        logger.info("gateway_runtime_stopped instance_id=%s", GATEWAY_INSTANCE_ID)
 
 
 runtime = Runtime()
@@ -222,12 +224,19 @@ class StrictESMMCPServer(MCPServer):
             raise ToolError(f"TOOL_CONTRACT_INVALID: {name} received unknown arguments")
         request_id = str(uuid.uuid4())
         started = time.monotonic()
-        logger.info("gateway_tool_started request_id=%s tool=%s", request_id, name)
+        logger.info(
+            "gateway_tool_started instance_id=%s request_id=%s tool=%s",
+            GATEWAY_INSTANCE_ID,
+            request_id,
+            name,
+        )
         try:
             result = await super().call_tool(name, arguments, context)
         except Exception:
             logger.exception(
-                "gateway_tool_failed request_id=%s tool=%s error_code=TOOL_EXECUTION_ERROR",
+                "gateway_tool_failed instance_id=%s request_id=%s tool=%s "
+                "error_code=TOOL_EXECUTION_ERROR",
+                GATEWAY_INSTANCE_ID,
                 request_id,
                 name,
             )
@@ -235,7 +244,9 @@ class StrictESMMCPServer(MCPServer):
         structured = getattr(result, "structured_content", None)
         result_code = structured.get("result_code") if isinstance(structured, dict) else None
         logger.info(
-            "gateway_tool_completed request_id=%s tool=%s result_code=%s duration_ms=%s",
+            "gateway_tool_completed instance_id=%s request_id=%s tool=%s "
+            "result_code=%s duration_ms=%s",
+            GATEWAY_INSTANCE_ID,
             request_id,
             name,
             result_code or "RESULT_CODE_UNAVAILABLE",
@@ -396,6 +407,7 @@ async def healthz(request: Request) -> JSONResponse:
         {
             "status": "ok" if healthy else "misconfigured" if not configured else "degraded",
             "gateway_version": GATEWAY_VERSION,
+            "gateway_instance_id": GATEWAY_INSTANCE_ID,
             "server_time_utc": utc_text(),
             "gateway_token_configured": bool(gateway_token()),
             "runtime_configuration_present": configured,
@@ -528,8 +540,10 @@ def logging_config() -> dict[str, Any]:
 def main() -> None:
     logging.config.dictConfig(logging_config())
     logger.info(
-        "gateway_starting version=%s access_configured=%s runtime_config_present=%s",
+        "gateway_starting version=%s instance_id=%s access_configured=%s "
+        "runtime_config_present=%s",
         GATEWAY_VERSION,
+        GATEWAY_INSTANCE_ID,
         bool(gateway_token()),
         runtime_configuration_present(),
     )
