@@ -877,6 +877,11 @@ class ESMGatewayService:
                         "status": "projection_pending",
                         "result_code": "WRITE_COMMITTED_PROJECTION_PENDING",
                         "event_id": last_event.event_id,
+                        "artifact_commit_acknowledged": None,
+                        "artifact_readback_succeeded": None,
+                        "event_commit_acknowledged": True,
+                        "projection_readback_succeeded": False,
+                        "pending_phases": ["projection_readback"],
                     }
                 )
                 pending_projection_checks.append(
@@ -889,6 +894,28 @@ class ESMGatewayService:
                         "temp_application_id": temp_id,
                         "status": "failed",
                         "result_code": exc.result_code,
+                        "failed_phase": (
+                            exc.failed_phase
+                            if isinstance(exc, PersistenceError)
+                            else None
+                        ),
+                        "artifact_commit_acknowledged": (
+                            exc.artifact_commit_acknowledged
+                            if isinstance(exc, PersistenceError)
+                            else None
+                        ),
+                        "artifact_readback_succeeded": (
+                            exc.artifact_readback_succeeded
+                            if isinstance(exc, PersistenceError)
+                            else None
+                        ),
+                        "event_commit_acknowledged": (
+                            exc.event_commit_acknowledged
+                            if isinstance(exc, PersistenceError)
+                            else None
+                        ),
+                        "projection_readback_succeeded": None,
+                        "pending_phases": [],
                     }
                 )
         if pending_projection_checks:
@@ -904,6 +931,8 @@ class ESMGatewayService:
                 if projected:
                     results[index]["status"] = "success"
                     results[index]["result_code"] = "WRITE_COMPLETED"
+                    results[index]["projection_readback_succeeded"] = True
+                    results[index]["pending_phases"] = []
         succeeded = sum(item["status"] in {"success", "projection_pending"} for item in results)
         has_pending = any(item["status"] == "projection_pending" for item in results)
         if succeeded != len(results):
@@ -934,33 +963,87 @@ class ESMGatewayService:
         if state.last_processed_stream_version != command["expected_stream_version"]:
             raise StateTransitionError("STREAM_VERSION_CONFLICT")
         artifact = Artifact(**command["artifact"]) if command.get("artifact") else None
+        artifact_receipt = None
         if artifact is not None:
-            await self.storage.put_artifact(artifact)
+            try:
+                artifact_receipt = await self.storage.put_artifact(artifact)
+            except PersistenceError as exc:
+                acknowledged = exc.artifact_commit_acknowledged
+                if acknowledged is None and not exc.write_may_have_succeeded:
+                    acknowledged = False
+                raise exc.with_context(
+                    failed_phase=exc.failed_phase or "artifact_write",
+                    artifact_id=artifact.artifact_id,
+                    artifact_commit_acknowledged=acknowledged,
+                    event_commit_acknowledged=False,
+                ) from exc
         artifact_ids = [artifact.artifact_id] if artifact else []
         artifact_ids.extend(command.get("reference_artifact_ids", []))
-        event = await self._append(
-            identity=identity,
-            owner_id=state.esm_owner_id,
-            owner_display_name=state.esm_owner_display_name,
-            source_session_id=source_session_id,
-            confirmation_id=str(claims["confirmation_id"]),
-            temp_application_id=state.temp_application_id,
-            event_type=command["event_type"],
-            payload=command["payload"],
-            artifact_ids=artifact_ids,
-            suffix="business",
-            target_event_id=command.get("target_event_id"),
-        )
+        try:
+            event = await self._append(
+                identity=identity,
+                owner_id=state.esm_owner_id,
+                owner_display_name=state.esm_owner_display_name,
+                source_session_id=source_session_id,
+                confirmation_id=str(claims["confirmation_id"]),
+                temp_application_id=state.temp_application_id,
+                event_type=command["event_type"],
+                payload=command["payload"],
+                artifact_ids=artifact_ids,
+                suffix="business",
+                target_event_id=command.get("target_event_id"),
+            )
+        except PersistenceError as exc:
+            event_acknowledged = exc.event_commit_acknowledged
+            if event_acknowledged is None and not exc.write_may_have_succeeded:
+                event_acknowledged = False
+            raise exc.with_context(
+                failed_phase=exc.failed_phase or "event_append",
+                artifact_id=artifact.artifact_id if artifact else None,
+                artifact_commit_acknowledged=(
+                    artifact_receipt.commit_acknowledged
+                    if artifact_receipt is not None
+                    else None
+                ),
+                artifact_readback_succeeded=(
+                    artifact_receipt.readback_succeeded
+                    if artifact_receipt is not None
+                    else None
+                ),
+                event_commit_acknowledged=event_acknowledged,
+            ) from exc
         self.projector.notify()
-        projected = await self._wait_for_projection(state.temp_application_id, event.event_id)
+        projected, artifact_visible = await asyncio.gather(
+            self._wait_for_projection(state.temp_application_id, event.event_id),
+            self._wait_for_artifact_readback(artifact),
+        )
+        if projected and artifact_visible:
+            result_code = "WRITE_COMPLETED"
+        elif not artifact_visible:
+            result_code = "WRITE_COMMITTED_READBACK_PENDING"
+        else:
+            result_code = "WRITE_COMMITTED_PROJECTION_PENDING"
+        pending_phases = []
+        if not artifact_visible:
+            pending_phases.append("artifact_readback")
+        if not projected:
+            pending_phases.append("projection_readback")
         return {
-            "status": "success" if projected else "pending",
-            "result_code": "WRITE_COMPLETED" if projected else "WRITE_COMMITTED_PROJECTION_PENDING",
+            "status": "success" if result_code == "WRITE_COMPLETED" else "pending",
+            "result_code": result_code,
             "identity_verified": True,
             "temp_application_id": state.temp_application_id,
             "event_id": event.event_id,
             "artifact_id": artifact.artifact_id if artifact else None,
+            "artifact_commit_acknowledged": (
+                artifact_receipt.commit_acknowledged
+                if artifact_receipt is not None
+                else None
+            ),
+            "artifact_readback_succeeded": artifact_visible if artifact else None,
+            "event_commit_acknowledged": True,
             "projection_readback_succeeded": projected,
+            "pending_phases": pending_phases,
             "credential_material_returned": False,
         }
 
@@ -980,18 +1063,21 @@ class ESMGatewayService:
         ):
             raise StateTransitionError("ADMIN_REVIEW_NOT_REQUESTED")
         artifact = Artifact(**command["artifact"])
-        stored, created = await self.storage.put_artifact(artifact)
-        readback = await self.storage.get_artifact(stored.artifact_id)
-        if readback != stored:
-            raise PersistenceError(
-                "ARTIFACT_READBACK_FAILED", write_may_have_succeeded=True
-            )
+        receipt = await self.storage.put_artifact(artifact)
+        readback_succeeded = await self._wait_for_artifact_readback(artifact)
         return {
-            "status": "success",
-            "result_code": "ADMIN_REVIEW_ARTIFACT_SAVED",
+            "status": "success" if readback_succeeded else "pending",
+            "result_code": (
+                "ADMIN_REVIEW_ARTIFACT_SAVED"
+                if readback_succeeded
+                else "ADMIN_REVIEW_ARTIFACT_COMMITTED_READBACK_PENDING"
+            ),
             "identity_verified": True,
-            "artifact_id": stored.artifact_id,
-            "artifact_created": created,
+            "artifact_id": receipt.artifact.artifact_id,
+            "artifact_created": receipt.created,
+            "artifact_commit_acknowledged": receipt.commit_acknowledged,
+            "artifact_readback_succeeded": readback_succeeded,
+            "event_commit_acknowledged": None,
             "state_changed": False,
             "credential_material_returned": False,
         }
@@ -1067,6 +1153,42 @@ class ESMGatewayService:
             except GatewayError:
                 state = None
             if state is not None and state.last_applied_event_id == event_id:
+                return True
+            retry_delay_seconds = min(retry_delay_seconds * 2, 5.0)
+        return False
+
+    async def _wait_for_artifact_readback(self, artifact: Artifact | None) -> bool:
+        if artifact is None:
+            return True
+
+        async def visible() -> bool:
+            try:
+                stored = await self.storage.get_artifact(artifact.artifact_id)
+                if stored != artifact:
+                    return False
+                if artifact.supersedes_artifact_id:
+                    predecessor = await self.storage.get_artifact(
+                        artifact.supersedes_artifact_id
+                    )
+                    return (
+                        predecessor is not None
+                        and predecessor.artifact_status == "superseded"
+                    )
+                return True
+            except GatewayError:
+                return False
+
+        if await visible():
+            return True
+        if self.projection_wait_seconds <= 0:
+            return False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.projection_wait_seconds
+        retry_delay_seconds = 0.05
+        while loop.time() < deadline:
+            remaining_seconds = deadline - loop.time()
+            await asyncio.sleep(min(retry_delay_seconds, remaining_seconds))
+            if await visible():
                 return True
             retry_delay_seconds = min(retry_delay_seconds * 2, 5.0)
         return False

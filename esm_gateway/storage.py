@@ -32,6 +32,14 @@ class EventDraft:
     target_event_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactWriteReceipt:
+    artifact: Artifact
+    created: bool
+    commit_acknowledged: bool
+    readback_succeeded: bool
+
+
 class Storage(Protocol):
     async def append_event(self, draft: EventDraft) -> tuple[Event, bool]: ...
 
@@ -53,9 +61,13 @@ class Storage(Protocol):
 
     async def upsert_state(self, state: ExpertState) -> None: ...
 
-    async def put_artifact(self, artifact: Artifact) -> tuple[Artifact, bool]: ...
+    async def put_artifact(self, artifact: Artifact) -> ArtifactWriteReceipt: ...
 
     async def get_artifact(self, artifact_id: str) -> Artifact | None: ...
+
+    async def mark_artifact_orphaned(
+        self, artifact_id: str, temp_application_id: str
+    ) -> Artifact: ...
 
     async def find_artifacts(
         self,
@@ -196,14 +208,19 @@ class InMemoryStorage:
     async def upsert_state(self, state: ExpertState) -> None:
         self.states[state.temp_application_id] = deepcopy(state)
 
-    async def put_artifact(self, artifact: Artifact) -> tuple[Artifact, bool]:
+    async def put_artifact(self, artifact: Artifact) -> ArtifactWriteReceipt:
         async with self._lock:
             existing = self.artifacts.get(artifact.artifact_id)
             if existing is not None:
                 if existing != artifact:
                     raise ContractError("ARTIFACT_ID_REUSED_WITH_DIFFERENT_CONTENT")
                 self._supersede_predecessor(artifact)
-                return deepcopy(existing), False
+                return ArtifactWriteReceipt(
+                    artifact=deepcopy(existing),
+                    created=False,
+                    commit_acknowledged=True,
+                    readback_succeeded=True,
+                )
             for candidate in self.artifacts.values():
                 if (
                     candidate.logical_artifact_id == artifact.logical_artifact_id
@@ -212,7 +229,12 @@ class InMemoryStorage:
                     raise ContractError("ARTIFACT_VERSION_CONFLICT")
             self.artifacts[artifact.artifact_id] = deepcopy(artifact)
             self._supersede_predecessor(artifact)
-            return deepcopy(artifact), True
+            return ArtifactWriteReceipt(
+                artifact=deepcopy(artifact),
+                created=True,
+                commit_acknowledged=True,
+                readback_succeeded=True,
+            )
 
     def _supersede_predecessor(self, artifact: Artifact) -> None:
         if not artifact.supersedes_artifact_id:
@@ -232,6 +254,19 @@ class InMemoryStorage:
     async def get_artifact(self, artifact_id: str) -> Artifact | None:
         artifact = self.artifacts.get(artifact_id)
         return deepcopy(artifact) if artifact is not None else None
+
+    async def mark_artifact_orphaned(
+        self, artifact_id: str, temp_application_id: str
+    ) -> Artifact:
+        async with self._lock:
+            artifact = self.artifacts.get(artifact_id)
+            if artifact is None or artifact.temp_application_id != temp_application_id:
+                raise ContractError("ARTIFACT_NOT_FOUND")
+            if artifact.artifact_status != "active":
+                raise ContractError("ARTIFACT_NOT_ACTIVE")
+            updated = replace(artifact, artifact_status="orphaned")
+            self.artifacts[artifact_id] = updated
+            return deepcopy(updated)
 
     async def find_artifacts(
         self,

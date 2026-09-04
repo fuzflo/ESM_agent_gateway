@@ -17,7 +17,7 @@ import httpx
 
 from .contracts import Artifact, Event, ExpertState
 from .errors import ConfigurationError, ContractError, PersistenceError
-from .storage import EventDraft
+from .storage import ArtifactWriteReceipt, EventDraft
 from .util import canonical_json, new_id, sha256_value, utc_text
 
 
@@ -678,6 +678,7 @@ class NotionStorage:
             raise ConfigurationError("NOTION_CONFIGURATION_MISSING")
         self._append_lock = asyncio.Lock()
         self._next_sequence: int | None = None
+        self._artifact_commit_acks: dict[str, Artifact] = {}
 
     async def preflight(self) -> dict[str, str]:
         schemas = await asyncio.gather(
@@ -746,14 +747,24 @@ class NotionStorage:
             values = event.as_record()
             values["application_id"] = None
             values["esm_owner_user_at_event_time"] = []
-            created_page = await self.event_writer.create_page(
-                self.events_id, encode_values(EVENT_FIELDS, values)
-            )
+            try:
+                created_page = await self.event_writer.create_page(
+                    self.events_id, encode_values(EVENT_FIELDS, values)
+                )
+            except PersistenceError as exc:
+                raise exc.with_context(
+                    failed_phase="event_append",
+                    event_id=event.event_id,
+                ) from exc
             self._next_sequence = sequence + 1
             page_id = created_page.get("id")
             if not isinstance(page_id, str) or not page_id:
                 raise PersistenceError(
-                    "NOTION_RESPONSE_INVALID", write_may_have_succeeded=True
+                    "NOTION_RESPONSE_INVALID",
+                    write_may_have_succeeded=True,
+                    failed_phase="event_append",
+                    event_id=event.event_id,
+                    event_commit_acknowledged=None,
                 )
             # A 2xx create response with a page ID is Notion's commit
             # acknowledgement. Some API responses do not immediately contain a
@@ -880,13 +891,53 @@ class NotionStorage:
         else:
             await self.state_store.create_page(self.state_id, properties)
 
-    async def put_artifact(self, artifact: Artifact) -> tuple[Artifact, bool]:
+    async def put_artifact(self, artifact: Artifact) -> ArtifactWriteReceipt:
+        acknowledged = self._artifact_commit_acks.get(artifact.artifact_id)
+        if acknowledged is not None:
+            if acknowledged != artifact:
+                raise ContractError("ARTIFACT_ID_REUSED_WITH_DIFFERENT_CONTENT")
+            try:
+                readback = await self.get_artifact(artifact.artifact_id)
+                supersession_visible = await self._supersede_artifact_predecessor(
+                    artifact
+                )
+            except PersistenceError as exc:
+                logger.warning(
+                    "artifact_commit_ack_readback_pending artifact_id=%s error_code=%s",
+                    artifact.artifact_id,
+                    exc.result_code,
+                )
+                readback = None
+                supersession_visible = False
+            if readback is not None and readback != artifact:
+                raise PersistenceError(
+                    "ARTIFACT_READBACK_MISMATCH",
+                    write_may_have_succeeded=True,
+                    failed_phase="artifact_readback",
+                    artifact_id=artifact.artifact_id,
+                    artifact_commit_acknowledged=True,
+                    artifact_readback_succeeded=False,
+                    event_commit_acknowledged=False,
+                )
+            return ArtifactWriteReceipt(
+                artifact=artifact,
+                created=False,
+                commit_acknowledged=True,
+                readback_succeeded=(
+                    readback == artifact and supersession_visible
+                ),
+            )
         existing = await self.get_artifact(artifact.artifact_id)
         if existing is not None:
             if existing != artifact:
                 raise ContractError("ARTIFACT_ID_REUSED_WITH_DIFFERENT_CONTENT")
-            await self._supersede_artifact_predecessor(artifact)
-            return existing, False
+            supersession_visible = await self._supersede_artifact_predecessor(artifact)
+            return ArtifactWriteReceipt(
+                artifact=existing,
+                created=False,
+                commit_acknowledged=True,
+                readback_succeeded=supersession_visible,
+            )
         family = await self.find_artifacts(
             temp_application_id=artifact.temp_application_id,
             artifact_type=artifact.artifact_type,
@@ -900,25 +951,63 @@ class NotionStorage:
         values = artifact.as_record()
         values["esm_owner_user"] = []
         values["source_artifact_ids"] = canonical_json(artifact.source_artifact_ids)
-        await self.artifact_store.create_page(
+        created_page = await self.artifact_store.create_page(
             self.artifact_id, encode_values(ARTIFACT_FIELDS, values)
         )
-        readback: Artifact | None = None
-        for _attempt in range(3):
-            readback = await self.get_artifact(artifact.artifact_id)
-            if readback is not None:
-                break
-            await asyncio.sleep(0.1)
-        if readback != artifact:
+        page_id = created_page.get("id")
+        if not isinstance(page_id, str) or not page_id:
             raise PersistenceError(
-                "ARTIFACT_READBACK_FAILED", write_may_have_succeeded=True
+                "NOTION_RESPONSE_INVALID",
+                write_may_have_succeeded=True,
+                failed_phase="artifact_create",
+                artifact_id=artifact.artifact_id,
+                artifact_commit_acknowledged=None,
+                event_commit_acknowledged=False,
             )
-        await self._supersede_artifact_predecessor(artifact)
-        return readback, True
+        self._artifact_commit_acks[artifact.artifact_id] = artifact
+        readback: Artifact | None = None
+        try:
+            for _attempt in range(3):
+                readback = await self.get_artifact(artifact.artifact_id)
+                if readback is not None:
+                    break
+                await asyncio.sleep(0.1)
+        except PersistenceError as exc:
+            logger.warning(
+                "artifact_post_commit_readback_pending artifact_id=%s error_code=%s",
+                artifact.artifact_id,
+                exc.result_code,
+            )
+            readback = None
+        if readback is not None and readback != artifact:
+            raise PersistenceError(
+                "ARTIFACT_READBACK_MISMATCH",
+                write_may_have_succeeded=True,
+                failed_phase="artifact_readback",
+                artifact_id=artifact.artifact_id,
+                artifact_commit_acknowledged=True,
+                artifact_readback_succeeded=False,
+                event_commit_acknowledged=False,
+            )
+        try:
+            supersession_visible = await self._supersede_artifact_predecessor(artifact)
+        except PersistenceError as exc:
+            logger.warning(
+                "artifact_supersession_readback_pending artifact_id=%s error_code=%s",
+                artifact.artifact_id,
+                exc.result_code,
+            )
+            supersession_visible = False
+        return ArtifactWriteReceipt(
+            artifact=artifact,
+            created=True,
+            commit_acknowledged=True,
+            readback_succeeded=readback == artifact and supersession_visible,
+        )
 
-    async def _supersede_artifact_predecessor(self, artifact: Artifact) -> None:
+    async def _supersede_artifact_predecessor(self, artifact: Artifact) -> bool:
         if not artifact.supersedes_artifact_id:
-            return
+            return True
         predecessor = await self.get_artifact(artifact.supersedes_artifact_id)
         if (
             predecessor is None
@@ -927,7 +1016,7 @@ class NotionStorage:
         ):
             raise ContractError("ARTIFACT_SUPERSEDES_INVALID")
         if predecessor.artifact_status == "superseded":
-            return
+            return True
         if predecessor.artifact_status != "active":
             raise ContractError("ARTIFACT_SUPERSEDES_INVALID")
         pages = await self.agent_reader.query(
@@ -939,15 +1028,68 @@ class NotionStorage:
         )
         if len(pages) != 1 or not isinstance(pages[0].get("id"), str):
             raise PersistenceError("NOTION_ARTIFACT_NOT_UNIQUE")
-        await self.artifact_store.update_page(
+        updated_page = await self.artifact_store.update_page(
             pages[0]["id"],
             {"artifact_status": encode_property("select", "superseded")},
         )
+        if not isinstance(updated_page.get("id"), str):
+            raise PersistenceError(
+                "NOTION_RESPONSE_INVALID", write_may_have_succeeded=True
+            )
         readback = await self.get_artifact(predecessor.artifact_id)
-        if readback is None or readback.artifact_status != "superseded":
+        if readback is None:
+            return False
+        if readback.artifact_status != "superseded":
             raise PersistenceError(
                 "ARTIFACT_SUPERSEDE_READBACK_FAILED", write_may_have_succeeded=True
             )
+        return True
+
+    async def mark_artifact_orphaned(
+        self, artifact_id: str, temp_application_id: str
+    ) -> Artifact:
+        artifact = await self.get_artifact(artifact_id)
+        if artifact is None or artifact.temp_application_id != temp_application_id:
+            raise ContractError("ARTIFACT_NOT_FOUND")
+        if artifact.artifact_status != "active":
+            raise ContractError("ARTIFACT_NOT_ACTIVE")
+        pages = await self.agent_reader.query(
+            self.artifact_id,
+            filter_body=equals_filter(ARTIFACT_FIELDS, "artifact_id", artifact_id),
+            page_size=2,
+        )
+        if len(pages) != 1 or not isinstance(pages[0].get("id"), str):
+            raise PersistenceError("NOTION_ARTIFACT_NOT_UNIQUE")
+        try:
+            updated_page = await self.artifact_store.update_page(
+                pages[0]["id"],
+                {"artifact_status": encode_property("select", "orphaned")},
+            )
+        except PersistenceError as exc:
+            raise exc.with_context(
+                failed_phase="orphan_status_update",
+                artifact_id=artifact_id,
+            ) from exc
+        if not isinstance(updated_page.get("id"), str):
+            raise PersistenceError(
+                "NOTION_RESPONSE_INVALID",
+                write_may_have_succeeded=True,
+                failed_phase="orphan_status_update",
+                artifact_id=artifact_id,
+                artifact_commit_acknowledged=None,
+            )
+        for _attempt in range(3):
+            readback = await self.get_artifact(artifact_id)
+            if readback is not None and readback.artifact_status == "orphaned":
+                return readback
+            await asyncio.sleep(0.1)
+        raise PersistenceError(
+            "ARTIFACT_ORPHAN_READBACK_FAILED",
+            write_may_have_succeeded=True,
+            failed_phase="orphan_status_readback",
+            artifact_id=artifact_id,
+            artifact_commit_acknowledged=True,
+        )
 
     async def get_artifact(self, artifact_id: str) -> Artifact | None:
         pages = await self.agent_reader.query(
