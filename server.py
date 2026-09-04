@@ -38,7 +38,7 @@ from esm_gateway.service import ESMGatewayService
 from esm_gateway.util import utc_text
 
 
-GATEWAY_VERSION = "1.1.6"
+GATEWAY_VERSION = "1.1.7"
 GATEWAY_INSTANCE_ID = str(uuid.uuid4())
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp")
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")  # noqa: S104
@@ -194,7 +194,16 @@ async def safe_call(
         logger.error("gateway_storage_failed error_code=%s", exc.result_code)
         return _failure(
             "GATEWAY_STORAGE_ERROR",
+            storage_result_code=exc.result_code,
             write_may_have_succeeded=exc.write_may_have_succeeded,
+            failed_phase=exc.failed_phase,
+            artifact_id=exc.artifact_id,
+            event_id=exc.event_id,
+            artifact_commit_acknowledged=exc.artifact_commit_acknowledged,
+            artifact_readback_succeeded=exc.artifact_readback_succeeded,
+            event_commit_acknowledged=exc.event_commit_acknowledged,
+            projection_readback_succeeded=None,
+            pending_phases=[],
             safe_retry_required=True,
         )
     except GatewayError as exc:

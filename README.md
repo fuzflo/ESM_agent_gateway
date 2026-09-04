@@ -2,7 +2,7 @@
 
 V1.1 是 V1 的向后兼容合同修订版，保持一个 Railway 服务、一个对外 MCP endpoint：
 
-当前补丁版本为 V1.1.5。AI draft 的 `source_execution_id` 与 `source_result_hash` 采用成对可选规则：可信生成元数据不可用时允许同时省略；只提供一个或提供格式错误的 SHA-256 时在签发确认卡前拒绝。Gateway 不生成虚假的来源绑定值。
+当前补丁版本为 V1.1.7。Artifact 和 Event 都以 Notion 2xx 创建响应中的非空 page ID 作为提交凭据；Artifact 创建已获得凭据但 Reader 暂时不可见时，Gateway 仍继续追加 Event，并将 Artifact 回读与状态投影分开报告。V1.1.6 的 43 字符 opaque confirmation token 和 V1.1.5 的 AI draft 成对可选规则保持不变。
 
 ```text
 Leapility ESM Agent
@@ -34,6 +34,8 @@ confirm_write               # append with Writer acknowledgement; projection rem
 
 `prepare_write` 必须在签发确认卡前验证将来真正写入的 Event payload，包括冻结的 `professional_domains` / `market_regions` 枚举与公开链接格式。已签发的确认卡不应因可预先检测的 payload 错误到 `confirm_write` 时才失败。
 
+V1.1.6 起的 `confirmation_token` 是 43 字符随机 capability，不再包含 command 正文。Gateway 仅在内存中保存 token 的 HMAC-SHA-256 值和完整 claims；日志只记录 token 长度、hash 前 12 位和非敏感 confirmation ID，不记录原始 token 或 command 正文。对外 MCP 工具形状不变。
+
 ## 身份映射
 
 10 位 ESM 共用一个 Railway 环境变量 `ESM_IDENTITY_MAP_JSON`，而不是 10 个环境变量。JSON 的 key 是每人当前唯一测试码，value 是：
@@ -64,10 +66,11 @@ market_regions: china_mainland
 - 真实四表作为空库启动，不使用虚拟或 sandbox 数据库。
 - `esm_gateway/notion.py` 对四表所有字段、类型和冻结枚举执行只读 preflight。任何漂移阻止服务启动；代码不修改 schema。
 - 未用字段保留为空，不删除、改名或改类型。
-- Event 写入以 Notion Writer 的 2xx 创建响应和非空 page ID 作为提交凭据。Notion 创建响应可能暂时缺少完整 properties，不因此把已提交写入判为失败；Artifact 写入和 ExpertState 投影仍做独立回读。
-- 生产默认 `PROJECTION_READBACK_WAIT_SECONDS=90`：`confirm_write` 在 Event/所需 Artifact 持久化后，最多等待 90 秒回读 ExpertState。期间以最大 5 秒的退避间隔重新唤醒 Worker。如果已观测到对应 `last_applied_event_id`，返回 `WRITE_COMPLETED`；90 秒后仍不可见则返回 `WRITE_COMMITTED_PROJECTION_PENDING`，绝不返回写入失败。
+- Artifact 与 Event 写入都以对应 Notion Writer 的 2xx 创建响应和非空 page ID 作为 commit ack。Notion Reader 可能延迟可见；Artifact 创建获得 ack 后即继续追加 Event，不再用 Artifact 的即时回读作为 Event 写入前置条件。
+- 生产默认 `PROJECTION_READBACK_WAIT_SECONDS=90`：`confirm_write` 在 commit ack 后并行等待 Artifact 独立回读与 ExpertState 投影。两者都完成时返回 `WRITE_COMPLETED`；Artifact 仍不可见时返回 `WRITE_COMMITTED_READBACK_PENDING`；仅投影未完成时返回 `WRITE_COMMITTED_PROJECTION_PENDING`。
 - 批量写入全部已提交但仍有投影待处理时，顶层返回 `BATCH_WRITE_COMMITTED_PROJECTION_PENDING`；只有每项投影回读都成功才返回 `BATCH_WRITE_COMPLETED`。失败子集用原 `batch_id` 和原 `temp_application_id` 安全重试。
-- 只有 Event、所需 Artifact 和 ExpertState 都能一致回读时，上层 Agent 才能对 ESM 称为“完整成功”；`WRITE_COMMITTED_PROJECTION_PENDING` 不得说成写入失败，也不得重复提交 Event。
+- 业务写入结果显式返回 `artifact_commit_acknowledged`、`artifact_readback_succeeded`、`event_commit_acknowledged`、`projection_readback_succeeded` 和 `pending_phases`。存储错误额外返回 `failed_phase`；Agent 不得用 snapshot 中的 `artifact_versions` 推断 Event 已提交。
+- 只有 Event、所需 Artifact 和 ExpertState 都能一致回读时，上层 Agent 才能对 ESM 称为“完整成功”；任何 `WRITE_COMMITTED_*` 不得说成写入失败，也不得重复提交 Event。
 - Feishu 链接只作为人工存档地址，Gateway 不打开、不读取正文。
 
 ## Projection Worker 调度
@@ -86,7 +89,7 @@ market_regions: china_mainland
 
 ## 单副本约束
 
-V1.1 Railway 必须配置为单副本。进程内锁保证同时 Event 写入的 `global_sequence` 和 stream version 串行；重启时从 Events 已有最高 sequence 恢复。V1.1 不支持多 Railway replica，也不支持同一 ESM 两个对话并发修改同一专家。
+V1.1 Railway 必须配置为单副本。进程内锁保证同时 Event 写入的 `global_sequence` 和 stream version 串行；重启时从 Events 已有最高 sequence 恢复。确认卡也存在当前 Gateway 进程内，因此 Railway 重启后旧卡失效。V1.1 不支持多 Railway replica，也不支持同一 ESM 两个对话并发修改同一专家。
 
 ## 本地验证
 
@@ -97,6 +100,16 @@ python3 scripts/preflight_notion.py
 
 `preflight_notion.py` 只读 schema，不写数据。
 
+修复历史故障遗留的孤立 Artifact 时，先运行默认 dry-run：
+
+```bash
+python3 scripts/reconcile_orphan_artifact.py \
+  --artifact-id ART-f0455701-1603-4991-93bb-7cffc5ee0bac \
+  --temp-application-id TMP-E788E384-AA85-4AA8-BC9D-181CD1902D9E
+```
+
+只有 dry-run 返回 `ORPHAN_ARTIFACT_RECONCILIATION_DRY_RUN` 且 `referencing_event_ids=[]` 后，才在同一组精确 ID 后追加 `--apply`。工具仅把 `artifact_status` 从 `active` 改为 `orphaned`，不删除页面，不修改 Event、ExpertState 或 Checkpoint。
+
 ## Railway
 
 1. 以 `esm-gateway-v1.1` 为服务根目录。
@@ -106,4 +119,4 @@ python3 scripts/preflight_notion.py
 5. `Procfile` 启动 `python server.py`。
 6. Leapility 只配置一个 MCP：`https://<railway-host>/mcp`，Bearer token 使用 `GATEWAY_TOKEN`。
 
-日志全部输出 stdout。正常 Gateway started/completed、Worker started/completed 和 Uvicorn 启动信息为 info；成功的 `httpx` provider 请求从 INFO 降噪，身份拒绝为 info；可恢复合同/权限问题为 warning；provider 和真实未处理异常为 error。`Terminating session: None` 被过滤。
+日志全部输出 stdout。正常 Gateway started/completed、Worker started/completed 和 Uvicorn 启动信息为 info；Gateway 工具日志带当前 `instance_id`，确认 token 日志只带长度和 HMAC fingerprint。成功的 `httpx` provider 请求从 INFO 降噪，身份拒绝为 info；可恢复合同/权限问题为 warning；provider 和真实未处理异常为 error。`Terminating session: None` 被过滤。
