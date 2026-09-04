@@ -17,7 +17,12 @@ import httpx
 
 from .contracts import Artifact, Event, ExpertState
 from .errors import ConfigurationError, ContractError, PersistenceError
-from .storage import ArtifactWriteReceipt, EventDraft
+from .storage import (
+    ArtifactWriteReceipt,
+    EventDraft,
+    artifact_mismatch_fields,
+    artifacts_equivalent,
+)
 from .util import canonical_json, new_id, sha256_value, utc_text
 
 
@@ -894,7 +899,7 @@ class NotionStorage:
     async def put_artifact(self, artifact: Artifact) -> ArtifactWriteReceipt:
         acknowledged = self._artifact_commit_acks.get(artifact.artifact_id)
         if acknowledged is not None:
-            if acknowledged != artifact:
+            if not artifacts_equivalent(acknowledged, artifact):
                 raise ContractError("ARTIFACT_ID_REUSED_WITH_DIFFERENT_CONTENT")
             try:
                 readback = await self.get_artifact(artifact.artifact_id)
@@ -909,7 +914,13 @@ class NotionStorage:
                 )
                 readback = None
                 supersession_visible = False
-            if readback is not None and readback != artifact:
+            if readback is not None and not artifacts_equivalent(artifact, readback):
+                mismatch_fields = artifact_mismatch_fields(artifact, readback)
+                logger.error(
+                    "artifact_readback_mismatch artifact_id=%s mismatch_fields=%s",
+                    artifact.artifact_id,
+                    ",".join(mismatch_fields),
+                )
                 raise PersistenceError(
                     "ARTIFACT_READBACK_MISMATCH",
                     write_may_have_succeeded=True,
@@ -924,12 +935,14 @@ class NotionStorage:
                 created=False,
                 commit_acknowledged=True,
                 readback_succeeded=(
-                    readback == artifact and supersession_visible
+                    readback is not None
+                    and artifacts_equivalent(artifact, readback)
+                    and supersession_visible
                 ),
             )
         existing = await self.get_artifact(artifact.artifact_id)
         if existing is not None:
-            if existing != artifact:
+            if not artifacts_equivalent(artifact, existing):
                 raise ContractError("ARTIFACT_ID_REUSED_WITH_DIFFERENT_CONTENT")
             supersession_visible = await self._supersede_artifact_predecessor(artifact)
             return ArtifactWriteReceipt(
@@ -979,7 +992,13 @@ class NotionStorage:
                 exc.result_code,
             )
             readback = None
-        if readback is not None and readback != artifact:
+        if readback is not None and not artifacts_equivalent(artifact, readback):
+            mismatch_fields = artifact_mismatch_fields(artifact, readback)
+            logger.error(
+                "artifact_readback_mismatch artifact_id=%s mismatch_fields=%s",
+                artifact.artifact_id,
+                ",".join(mismatch_fields),
+            )
             raise PersistenceError(
                 "ARTIFACT_READBACK_MISMATCH",
                 write_may_have_succeeded=True,
@@ -1002,7 +1021,11 @@ class NotionStorage:
             artifact=artifact,
             created=True,
             commit_acknowledged=True,
-            readback_succeeded=readback == artifact and supersession_visible,
+            readback_succeeded=(
+                readback is not None
+                and artifacts_equivalent(artifact, readback)
+                and supersession_visible
+            ),
         )
 
     async def _supersede_artifact_predecessor(self, artifact: Artifact) -> bool:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .contracts import Artifact, Event, ExpertState
@@ -38,6 +39,44 @@ class ArtifactWriteReceipt:
     created: bool
     commit_acknowledged: bool
     readback_succeeded: bool
+
+
+_ARTIFACT_UNORDERED_LIST_FIELDS = frozenset({"language", "allowed_purposes"})
+_ARTIFACT_TIMESTAMP_FIELDS = frozenset(
+    {"created_at", "reviewed_at", "link_last_checked_at", "retention_until"}
+)
+
+
+def _normalized_artifact_value(field_name: str, value: Any) -> Any:
+    if field_name in _ARTIFACT_UNORDERED_LIST_FIELDS and isinstance(value, list):
+        return tuple(sorted(set(value)))
+    if field_name not in _ARTIFACT_TIMESTAMP_FIELDS or not isinstance(value, str):
+        return value
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        instant = datetime.fromisoformat(candidate)
+    except ValueError:
+        return value
+    if instant.tzinfo is None:
+        return instant
+    return instant.astimezone(timezone.utc)
+
+
+def artifact_mismatch_fields(expected: Artifact, actual: Artifact) -> tuple[str, ...]:
+    """Return only field names whose provider-round-tripped values differ."""
+
+    expected_record = expected.as_record()
+    actual_record = actual.as_record()
+    return tuple(
+        field_name
+        for field_name in expected_record
+        if _normalized_artifact_value(field_name, expected_record[field_name])
+        != _normalized_artifact_value(field_name, actual_record[field_name])
+    )
+
+
+def artifacts_equivalent(expected: Artifact, actual: Artifact) -> bool:
+    return not artifact_mismatch_fields(expected, actual)
 
 
 class Storage(Protocol):

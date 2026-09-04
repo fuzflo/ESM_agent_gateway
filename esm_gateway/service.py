@@ -31,7 +31,7 @@ from .state_machine import (
     reduce_event,
     replay_stream,
 )
-from .storage import EventDraft, Storage
+from .storage import EventDraft, Storage, artifacts_equivalent
 from .util import new_id, new_temp_application_id, sha256_value, utc_text
 
 
@@ -1164,7 +1164,7 @@ class ESMGatewayService:
         async def visible() -> bool:
             try:
                 stored = await self.storage.get_artifact(artifact.artifact_id)
-                if stored != artifact:
+                if stored is None or not artifacts_equivalent(artifact, stored):
                     return False
                 if artifact.supersedes_artifact_id:
                     predecessor = await self.storage.get_artifact(
