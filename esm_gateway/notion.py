@@ -266,10 +266,16 @@ SELECT_OPTIONS: dict[tuple[str, str], set[str]] = {
     ("state", "professional_domains"): {
         "marketing", "sales", "gtm", "international_trade", "cross_border_ecommerce",
         "product", "operations", "people_hr", "finance",
-        "legal", "healthcare", "technology", "education", "creator_economy", "other",
+        "legal", "healthcare", "technology", "education", "creator_economy",
+        "professional_services", "financial_services", "retail_ecommerce",
+        "manufacturing_industrial", "real_estate", "construction_infrastructure",
+        "transportation_logistics", "hospitality_travel", "media_entertainment",
+        "energy_natural_resources", "agriculture_food", "life_sciences",
+        "government_public_policy", "nonprofit_social_impact", "other",
     },
     ("state", "market_regions"): {
-        "na", "latam", "emea", "apac", "china_mainland", "global", "other",
+        "na", "latam", "europe", "middle_east", "africa", "apac",
+        "china_mainland", "greater_china", "global", "other", "emea",
     },
     ("state", "current_stage"): {
         "sourcing", "evaluation", "initial_outreach", "discovery_call",
