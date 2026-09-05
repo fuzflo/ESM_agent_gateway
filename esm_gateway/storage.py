@@ -46,6 +46,7 @@ _ARTIFACT_PROVIDER_NORMALIZED_FIELDS = frozenset({"created_at"})
 _ARTIFACT_TIMESTAMP_FIELDS = frozenset(
     {"reviewed_at", "link_last_checked_at", "retention_until"}
 )
+_ARTIFACT_MINUTE_PRECISION_TIMESTAMP_FIELDS = frozenset({"reviewed_at"})
 
 
 def _normalized_artifact_value(field_name: str, value: Any) -> Any:
@@ -58,6 +59,8 @@ def _normalized_artifact_value(field_name: str, value: Any) -> Any:
         instant = datetime.fromisoformat(candidate)
     except ValueError:
         return value
+    if field_name in _ARTIFACT_MINUTE_PRECISION_TIMESTAMP_FIELDS:
+        instant = instant.replace(second=0, microsecond=0)
     if instant.tzinfo is None:
         return instant
     return instant.astimezone(timezone.utc)

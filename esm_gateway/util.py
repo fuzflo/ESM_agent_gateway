@@ -20,6 +20,15 @@ def utc_text(value: datetime | None = None) -> str:
     )
 
 
+def utc_minute_text(value: datetime | None = None) -> str:
+    """Return the UTC minute precision preserved by Notion date properties."""
+
+    instant = (value or utc_now()).astimezone(timezone.utc).replace(
+        second=0, microsecond=0
+    )
+    return instant.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -38,4 +47,3 @@ def new_id(prefix: str) -> str:
 
 def new_temp_application_id() -> str:
     return f"TMP-{str(uuid.uuid4()).upper()}"
-

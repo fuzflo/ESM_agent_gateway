@@ -32,7 +32,13 @@ from .state_machine import (
     replay_stream,
 )
 from .storage import EventDraft, Storage, artifacts_equivalent
-from .util import new_id, new_temp_application_id, sha256_value, utc_text
+from .util import (
+    new_id,
+    new_temp_application_id,
+    sha256_value,
+    utc_minute_text,
+    utc_text,
+)
 
 
 SUPPORTED_COMMAND_TYPES = frozenset(
@@ -694,7 +700,9 @@ class ESMGatewayService:
         family = [item for item in existing if item.logical_artifact_id == logical_id]
         version = max((item.artifact_version for item in family), default=0) + 1
         supersedes = max(family, key=lambda item: item.artifact_version).artifact_id if family else None
-        reviewed_at = utc_text() if version_role == "reviewed_final" else None
+        reviewed_at = (
+            utc_minute_text() if version_role == "reviewed_final" else None
+        )
         reviewed_by = identity.esm_owner_id if reviewed_at else None
         source_execution_id = _optional_text(raw.get("source_execution_id"))
         source_result_hash = _optional_text(raw.get("source_result_hash"))
