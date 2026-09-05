@@ -42,8 +42,9 @@ class ArtifactWriteReceipt:
 
 
 _ARTIFACT_UNORDERED_LIST_FIELDS = frozenset({"language", "allowed_purposes"})
+_ARTIFACT_PROVIDER_NORMALIZED_FIELDS = frozenset({"created_at"})
 _ARTIFACT_TIMESTAMP_FIELDS = frozenset(
-    {"created_at", "reviewed_at", "link_last_checked_at", "retention_until"}
+    {"reviewed_at", "link_last_checked_at", "retention_until"}
 )
 
 
@@ -62,17 +63,38 @@ def _normalized_artifact_value(field_name: str, value: Any) -> Any:
     return instant.astimezone(timezone.utc)
 
 
+def _valid_iso_date_or_datetime(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        datetime.fromisoformat(candidate)
+    except ValueError:
+        return False
+    return True
+
+
 def artifact_mismatch_fields(expected: Artifact, actual: Artifact) -> tuple[str, ...]:
     """Return only field names whose provider-round-tripped values differ."""
 
     expected_record = expected.as_record()
     actual_record = actual.as_record()
-    return tuple(
-        field_name
-        for field_name in expected_record
-        if _normalized_artifact_value(field_name, expected_record[field_name])
-        != _normalized_artifact_value(field_name, actual_record[field_name])
-    )
+    mismatches: list[str] = []
+    for field_name in expected_record:
+        expected_value = expected_record[field_name]
+        actual_value = actual_record[field_name]
+        if field_name in _ARTIFACT_PROVIDER_NORMALIZED_FIELDS:
+            if not (
+                _valid_iso_date_or_datetime(expected_value)
+                and _valid_iso_date_or_datetime(actual_value)
+            ):
+                mismatches.append(field_name)
+            continue
+        if _normalized_artifact_value(
+            field_name, expected_value
+        ) != _normalized_artifact_value(field_name, actual_value):
+            mismatches.append(field_name)
+    return tuple(mismatches)
 
 
 def artifacts_equivalent(expected: Artifact, actual: Artifact) -> bool:
