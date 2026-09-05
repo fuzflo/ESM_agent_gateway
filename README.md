@@ -2,7 +2,7 @@
 
 V1.1 是 V1 的向后兼容合同修订版，保持一个 Railway 服务、一个对外 MCP endpoint：
 
-当前补丁版本为 V1.1.8。Artifact 回读改用受控的语义比较：UTC 时间表达统一后比较，Notion multi-select 按无序集合比较，其他业务字段仍严格比较。这避免 Notion 对时区、毫秒或选项顺序的标准化被误判为 `ARTIFACT_READBACK_MISMATCH`，真实内容不一致仍会阻断 Event。V1.1.7 的分阶段 commit/readback 回执、V1.1.6 opaque token 和 V1.1.5 AI draft 规则保持不变。
+当前补丁版本为 V1.1.9。本版本将 Artifact `created_at` 明确为 provider-normalized 审计元数据：Notion 回读为另一个合法 ISO-8601 日期/时间时，不再阻断 Event 写入；`reviewed_at` 等业务时间及链接、content hash、Artifact ID、logical ID、版本、Owner、状态等仍严格比较。本版本同时在保留原有职能型 `professional_domains` 的前提下补齐 14 个宽口径行业标签；`market_regions` 新增欧洲、中东、非洲和大中华区，`emea` 仅作历史数据兼容值保留。V1.1.8 的分阶段 Artifact/Event 写入回执、V1.1.7 的 commit/readback 证据、V1.1.6 opaque token 和 V1.1.5 AI draft 规则保持不变。
 
 ```text
 Leapility ESM Agent
@@ -61,13 +61,26 @@ market_regions: china_mainland
 
 部署前必须先在 Notion ExpertState 对应 multi-select 属性中增加这四个精确小写选项，再立即部署 Gateway V1.1。当前 V1 的 schema preflight 使用精确枚举集合；如果在添加 Notion 选项后重启旧 V1，它会因 schema 漂移拒绝启动，因此应在受控维护窗口连续完成 Notion 变更和 V1.1 部署。
 
+V1.1.9 追加的 Notion 精确选项为：
+
+```text
+professional_domains: professional_services | financial_services | retail_ecommerce |
+  manufacturing_industrial | real_estate | construction_infrastructure |
+  transportation_logistics | hospitality_travel | media_entertainment |
+  energy_natural_resources | agriculture_food | life_sciences |
+  government_public_policy | nonprofit_social_impact
+market_regions: europe | middle_east | africa | greater_china
+```
+
+`emea` 不删除，以保证旧页面和历史 Event 仍可回读；Agent 的新写入必须改用 `europe` / `middle_east` / `africa`。`china_mainland` 继续表示仅中国大陆，`greater_china` 表示大中华区。完整中英文映射见 `esm-agent-v1.1/skills/esm-gateway-contract/references/enums.md`。由于 preflight 要求选项集合精确匹配，上线时仍要在同一维护窗口先改 Notion schema，再部署 V1.1.9。
+
 ## Notion 边界
 
 - 真实四表作为空库启动，不使用虚拟或 sandbox 数据库。
 - `esm_gateway/notion.py` 对四表所有字段、类型和冻结枚举执行只读 preflight。任何漂移阻止服务启动；代码不修改 schema。
 - 未用字段保留为空，不删除、改名或改类型。
 - Artifact 与 Event 写入都以对应 Notion Writer 的 2xx 创建响应和非空 page ID 作为 commit ack。Notion Reader 可能延迟可见；Artifact 创建获得 ack 后即继续追加 Event，不再用 Artifact 的即时回读作为 Event 写入前置条件。
-- Artifact 回读语义比较仅对 `created_at` / review/check/retention 时间做 ISO-8601 UTC 归一化，并对 `language` / `allowed_purposes` 做无序比较。链接、content hash、Artifact ID、logical ID、版本、Owner 和状态等字段仍严格相等。真实 mismatch 的日志只记录字段名，不记录字段值。
+- Artifact 回读把 `created_at` 作为 provider-normalized 审计元数据：写入值和回读值只要各自是非空、合法的 ISO-8601 日期/时间，就不比较具体值。`reviewed_at` / check/retention 等业务或策略时间仍做 UTC 归一化后严格比较；`language` / `allowed_purposes` 做无序比较；链接、content hash、Artifact ID、logical ID、版本、Owner 和状态等字段仍严格相等。非法或空的 `created_at` 仍会报 mismatch。真实 mismatch 的日志只记录字段名，不记录字段值。
 - 生产默认 `PROJECTION_READBACK_WAIT_SECONDS=90`：`confirm_write` 在 commit ack 后并行等待 Artifact 独立回读与 ExpertState 投影。两者都完成时返回 `WRITE_COMPLETED`；Artifact 仍不可见时返回 `WRITE_COMMITTED_READBACK_PENDING`；仅投影未完成时返回 `WRITE_COMMITTED_PROJECTION_PENDING`。
 - 批量写入全部已提交但仍有投影待处理时，顶层返回 `BATCH_WRITE_COMMITTED_PROJECTION_PENDING`；只有每项投影回读都成功才返回 `BATCH_WRITE_COMPLETED`。失败子集用原 `batch_id` 和原 `temp_application_id` 安全重试。
 - 业务写入结果显式返回 `artifact_commit_acknowledged`、`artifact_readback_succeeded`、`event_commit_acknowledged`、`projection_readback_succeeded` 和 `pending_phases`。存储错误额外返回 `failed_phase`；Agent 不得用 snapshot 中的 `artifact_versions` 推断 Event 已提交。

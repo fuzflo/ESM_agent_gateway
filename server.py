@@ -38,7 +38,7 @@ from esm_gateway.service import ESMGatewayService
 from esm_gateway.util import utc_text
 
 
-GATEWAY_VERSION = "1.1.8"
+GATEWAY_VERSION = "1.1.9"
 GATEWAY_INSTANCE_ID = str(uuid.uuid4())
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp")
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")  # noqa: S104
@@ -344,11 +344,18 @@ async def prepare_write(
                 "For batch commands, professional_domains must use one or more of "
                 "marketing, sales, gtm, international_trade, cross_border_ecommerce, "
                 "product, operations, people_hr, finance, legal, healthcare, technology, "
-                "education, creator_economy, other; market_regions must use one or more "
-                "of na, latam, emea, apac, china_mainland, global, other. Map SEO to "
+                "education, creator_economy, professional_services, financial_services, "
+                "retail_ecommerce, manufacturing_industrial, real_estate, "
+                "construction_infrastructure, transportation_logistics, hospitality_travel, "
+                "media_entertainment, energy_natural_resources, agriculture_food, "
+                "life_sciences, government_public_policy, nonprofit_social_impact, other; "
+                "market_regions must use one or more of na, latam, europe, middle_east, "
+                "africa, apac, china_mainland, greater_china, global, other. The legacy "
+                "emea value remains accepted only for backward compatibility. Map SEO to "
                 "marketing, GTM to gtm, foreign trade to international_trade, cross-border "
-                "e-commerce to cross_border_ecommerce, and Mainland China to "
-                "china_mainland; never send human-facing translated labels as enum values."
+                "e-commerce to cross_border_ecommerce, Mainland China to china_mainland, "
+                "and Greater China to greater_china; never send human-facing translated "
+                "labels as enum values."
             )
         ),
     ],
