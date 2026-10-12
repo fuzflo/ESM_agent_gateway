@@ -2,7 +2,7 @@
 
 V1.1 是 V1 的向后兼容合同修订版，保持一个 Railway 服务、一个对外 MCP endpoint：
 
-当前补丁版本为 V1.1.9。本版本将 Artifact `created_at` 明确为 provider-normalized 审计元数据：Notion 回读为另一个合法 ISO-8601 日期/时间时，不再阻断 Event 写入；`reviewed_at` 等业务时间及链接、content hash、Artifact ID、logical ID、版本、Owner、状态等仍严格比较。本版本同时在保留原有职能型 `professional_domains` 的前提下补齐 14 个宽口径行业标签；`market_regions` 新增欧洲、中东、非洲和大中华区，`emea` 仅作历史数据兼容值保留。V1.1.8 的分阶段 Artifact/Event 写入回执、V1.1.7 的 commit/readback 证据、V1.1.6 opaque token 和 V1.1.5 AI draft 规则保持不变。
+当前补丁版本为 V1.1.10。Notion 的可编辑 date 属性在实际回读中将 Artifact `reviewed_at` 降为分钟精度；本版本在确认卡签发前就将该字段规范为 UTC 分钟，并以相同精度做 Artifact 回读比较。同一分钟内的 provider 截断不再阻断 Event，不同分钟、仅日期值及其他字段差异仍拒绝。V1.1.9 的 `created_at` provider-normalized 规则、枚举扩充，以及 V1.1.8 的分阶段 Artifact/Event 写入回执保持不变。
 
 ```text
 Leapility ESM Agent
@@ -80,7 +80,7 @@ market_regions: europe | middle_east | africa | greater_china
 - `esm_gateway/notion.py` 对四表所有字段、类型和冻结枚举执行只读 preflight。任何漂移阻止服务启动；代码不修改 schema。
 - 未用字段保留为空，不删除、改名或改类型。
 - Artifact 与 Event 写入都以对应 Notion Writer 的 2xx 创建响应和非空 page ID 作为 commit ack。Notion Reader 可能延迟可见；Artifact 创建获得 ack 后即继续追加 Event，不再用 Artifact 的即时回读作为 Event 写入前置条件。
-- Artifact 回读把 `created_at` 作为 provider-normalized 审计元数据：写入值和回读值只要各自是非空、合法的 ISO-8601 日期/时间，就不比较具体值。`reviewed_at` / check/retention 等业务或策略时间仍做 UTC 归一化后严格比较；`language` / `allowed_purposes` 做无序比较；链接、content hash、Artifact ID、logical ID、版本、Owner 和状态等字段仍严格相等。非法或空的 `created_at` 仍会报 mismatch。真实 mismatch 的日志只记录字段名，不记录字段值。
+- Artifact 回读把 `created_at` 作为 provider-normalized 审计元数据：写入值和回读值只要各自是非空、合法的 ISO-8601 日期/时间，就不比较具体值。`reviewed_at` 使用 Notion 保留的 UTC 分钟精度严格比较：同分钟内的秒/毫秒截断等价，不同分钟或仅日期值仍报 mismatch。check/retention 等其他业务或策略时间继续做 UTC 归一化后严格比较；`language` / `allowed_purposes` 做无序比较；链接、content hash、Artifact ID、logical ID、版本、Owner 和状态等字段仍严格相等。真实 mismatch 的日志只记录字段名，不记录字段值。
 - 生产默认 `PROJECTION_READBACK_WAIT_SECONDS=90`：`confirm_write` 在 commit ack 后并行等待 Artifact 独立回读与 ExpertState 投影。两者都完成时返回 `WRITE_COMPLETED`；Artifact 仍不可见时返回 `WRITE_COMMITTED_READBACK_PENDING`；仅投影未完成时返回 `WRITE_COMMITTED_PROJECTION_PENDING`。
 - 批量写入全部已提交但仍有投影待处理时，顶层返回 `BATCH_WRITE_COMMITTED_PROJECTION_PENDING`；只有每项投影回读都成功才返回 `BATCH_WRITE_COMPLETED`。失败子集用原 `batch_id` 和原 `temp_application_id` 安全重试。
 - 业务写入结果显式返回 `artifact_commit_acknowledged`、`artifact_readback_succeeded`、`event_commit_acknowledged`、`projection_readback_succeeded` 和 `pending_phases`。存储错误额外返回 `failed_phase`；Agent 不得用 snapshot 中的 `artifact_versions` 推断 Event 已提交。

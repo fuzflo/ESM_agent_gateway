@@ -38,7 +38,7 @@ from esm_gateway.service import ESMGatewayService
 from esm_gateway.util import utc_text
 
 
-GATEWAY_VERSION = "1.1.9"
+GATEWAY_VERSION = "1.1.10"
 GATEWAY_INSTANCE_ID = str(uuid.uuid4())
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp")
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")  # noqa: S104
