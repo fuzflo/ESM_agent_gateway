@@ -68,11 +68,39 @@ PROFESSIONAL_DOMAIN_VALUES = frozenset(
         "technology",
         "education",
         "creator_economy",
+        "professional_services",
+        "financial_services",
+        "retail_ecommerce",
+        "manufacturing_industrial",
+        "real_estate",
+        "construction_infrastructure",
+        "transportation_logistics",
+        "hospitality_travel",
+        "media_entertainment",
+        "energy_natural_resources",
+        "agriculture_food",
+        "life_sciences",
+        "government_public_policy",
+        "nonprofit_social_impact",
         "other",
     }
 )
 MARKET_REGION_VALUES = frozenset(
-    {"na", "latam", "emea", "apac", "china_mainland", "global", "other"}
+    {
+        "na",
+        "latam",
+        "europe",
+        "middle_east",
+        "africa",
+        "apac",
+        "china_mainland",
+        "greater_china",
+        "global",
+        "other",
+        # Kept for backward compatibility with existing pages and events. New
+        # writes should use europe, middle_east, and/or africa instead.
+        "emea",
+    }
 )
 OUTREACH_CHANNELS = frozenset(
     {"email", "linkedin", "x", "whatsapp", "wechat", "phone", "other"}
