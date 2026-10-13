@@ -31,7 +31,7 @@ NOTION_VERSION = os.environ.get("NOTION_VERSION", "2026-03-11")
 NOTION_TIMEOUT_SECONDS = 15.0
 NOTION_READ_RETRY_ATTEMPTS = 3
 NOTION_READ_RETRY_BASE_DELAY_SECONDS = 0.5
-PROJECTION_VERSION = "1.1.0"
+PROJECTION_VERSION = "1.2.0"
 CHECKPOINT_ID = "esm-v1-projector:all"
 
 
@@ -262,7 +262,7 @@ SELECT_OPTIONS: dict[tuple[str, str], set[str]] = {
         "event_corrected", "event_voided",
     },
     ("events", "actor_type"): {"esm", "agent", "system", "admin", "integration"},
-    ("state", "source"): {"inbound", "esm_outbound"},
+    ("state", "source"): {"inbound", "esm_outbound", "ordinary_inbound", "important_inbound"},
     ("state", "professional_domains"): {
         "marketing", "sales", "gtm", "international_trade", "cross_border_ecommerce",
         "product", "operations", "people_hr", "finance",
@@ -285,7 +285,7 @@ SELECT_OPTIONS: dict[tuple[str, str], set[str]] = {
         "ready", "in_progress", "ai_draft_ready", "awaiting_esm_review",
         "reviewed_final_ready", "prep_ready", "prep_in_progress",
         "prep_ai_draft_ready", "awaiting_prep_review", "ready_to_send",
-        "awaiting_reply", "reply_received", "awaiting_schedule", "ready_for_call",
+        "awaiting_reply", "reply_received", "awaiting_schedule", "awaiting_progress_assessment", "ready_for_call",
         "call_completed_awaiting_source", "recap_ready", "recap_in_progress",
         "recap_ai_draft_ready", "awaiting_recap_review", "paused",
         "failed_retryable", "intervention_required", "canceled", "closed", "completed",
@@ -294,7 +294,7 @@ SELECT_OPTIONS: dict[tuple[str, str], set[str]] = {
         "ready", "in_progress", "ai_draft_ready", "awaiting_esm_review",
         "reviewed_final_ready", "prep_ready", "prep_in_progress",
         "prep_ai_draft_ready", "awaiting_prep_review", "ready_to_send",
-        "awaiting_reply", "reply_received", "awaiting_schedule", "ready_for_call",
+        "awaiting_reply", "reply_received", "awaiting_schedule", "awaiting_progress_assessment", "ready_for_call",
         "call_completed_awaiting_source", "recap_ready", "recap_in_progress",
         "recap_ai_draft_ready", "awaiting_recap_review", "paused",
         "failed_retryable", "intervention_required", "canceled", "closed", "completed",
@@ -341,7 +341,7 @@ SELECT_OPTIONS: dict[tuple[str, str], set[str]] = {
         "public_profile_reference", "sourcing_report", "evaluation_report",
         "initial_outreach_material", "outreach_response", "discovery_call_prep",
         "discovery_call_transcript", "discovery_call_notes", "discovery_call_recap",
-        "expert_conversation_link", "expert_agent_link", "positioning_call_prep",
+        "expert_conversation_link", "expert_agent_link", "leapility_card_link", "positioning_call_prep",
         "positioning_call_transcript", "positioning_call_notes",
         "positioning_call_recap", "esm_work_note",
     },
@@ -362,7 +362,7 @@ SELECT_OPTIONS: dict[tuple[str, str], set[str]] = {
     ("artifact", "link_access_status"): {"not_checked", "accessible", "login_required", "inaccessible"},
     ("artifact", "ingestion_status"): {"pending", "ready", "failed", "quarantined"},
     ("artifact", "security_scan_status"): {"not_scanned", "passed", "flagged", "not_applicable"},
-    ("checkpoint", "supported_event_schema_versions"): {"1.0.0", "1.1.0"},
+    ("checkpoint", "supported_event_schema_versions"): {"1.0.0", "1.1.0", "1.2.0"},
     ("checkpoint", "status"): {"idle", "running", "failed", "paused", "rebuilding"},
     ("checkpoint", "run_mode"): {"incremental", "full_replay", "targeted_replay"},
     ("checkpoint", "last_error_code"): {
@@ -433,7 +433,7 @@ def encode_property(prop_type: str, value: Any) -> dict[str, Any]:
         if value is None or value == "":
             return {prop_type: []}
         content = value if isinstance(value, str) else canonical_json(value)
-        return {prop_type: [{"type": "text", "text": {"content": content}}]}
+        return {prop_type: [{"type": "text", "text": {"content": content[i:i + 2000]}} for i in range(0, len(content), 2000)]}
     if prop_type == "number":
         return {"number": value}
     if prop_type in {"select", "status"}:
@@ -823,6 +823,10 @@ class NotionStorage:
         )
         return [_decode_event(page) for page in pages[:limit]]
 
+    async def list_all_artifacts(self) -> list[Artifact]:
+        pages = await self.agent_reader.query(self.artifact_id, page_size=100, fetch_all=True)
+        return [_decode_artifact(page) for page in pages]
+
     async def stream_events(self, temp_application_id: str) -> list[Event]:
         pages = await self.event_reader.query(
             self.events_id,
@@ -1187,7 +1191,7 @@ class NotionStorage:
             "checkpoint_id": CHECKPOINT_ID,
             "projector_name": "esm-v1-projector",
             "projector_version": PROJECTION_VERSION,
-            "supported_event_schema_versions": ["1.0.0", "1.1.0"],
+            "supported_event_schema_versions": ["1.0.0", "1.1.0", "1.2.0"],
             "shard_key": "all",
             "status": "idle",
             "run_mode": "incremental",

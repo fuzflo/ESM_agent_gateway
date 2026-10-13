@@ -8,6 +8,7 @@ from dataclasses import asdict
 from typing import Any
 
 from .confirmation import CONFIRMATION_PHRASE, ConfirmationService
+from .csv_service import CSVImportService
 from .contracts import (
     MARKET_REGION_VALUES,
     PROFESSIONAL_DOMAIN_VALUES,
@@ -42,7 +43,7 @@ from .util import (
 
 
 SUPPORTED_COMMAND_TYPES = frozenset(
-    {"create_standard_batch", "create_trusted_batch", "business_event", "admin_review"}
+    {"create_standard_batch", "create_trusted_batch", "business_event", "admin_review", "import_experts_csv_batch"}
 )
 CORRECTABLE_EVENT_TYPES = frozenset(
     {
@@ -112,7 +113,7 @@ SKILL_EVENT_TYPES: dict[str, frozenset[str]] = {
 }
 
 
-class ESMGatewayService:
+class ESMGatewayService(CSVImportService):
     def __init__(
         self,
         *,
@@ -128,6 +129,7 @@ class ESMGatewayService:
         self.projector = projector
         self.projection_wait_seconds = projection_wait_seconds
         self._write_lock = asyncio.Lock()
+        self._csv_batches: dict[str, Any] = {}
 
     def verify_identity(self, raw_code: str) -> dict[str, Any]:
         identity = self.identities.verify(raw_code)
@@ -295,6 +297,12 @@ class ESMGatewayService:
         confirmation_phrase: str,
     ) -> dict[str, Any]:
         identity = self._require_identity(raw_code)
+        claims = self.confirmations.verify(
+            token=confirmation_token, phrase=confirmation_phrase,
+            identity_id=identity.esm_owner_id, source_session_id=source_session_id,
+        )
+        if claims["command"]["command_type"] == "import_experts_csv_batch":
+            return await self._confirm_csv(identity, source_session_id, claims)
         async with self._write_lock:
             claims = self.confirmations.verify(
                 token=confirmation_token,
@@ -325,6 +333,8 @@ class ESMGatewayService:
         if not isinstance(command, dict) or command.get("command_type") not in SUPPORTED_COMMAND_TYPES:
             raise ContractError("COMMAND_TYPE_UNSUPPORTED_V1")
         command_type = command["command_type"]
+        if command_type == "import_experts_csv_batch":
+            return await self._normalize_csv(identity, command)
         if command_type in {"create_standard_batch", "create_trusted_batch"}:
             return await self._normalize_batch(identity, command)
         if command_type == "business_event":
@@ -1266,6 +1276,12 @@ def _bind_artifact_payload(
 
 def _public_preview(command: dict[str, Any]) -> dict[str, Any]:
     preview = deepcopy(command)
+    if command["command_type"] == "import_experts_csv_batch":
+        preview.pop("csv_text", None)
+        for candidate in preview["candidates"]:
+            candidate.pop("payload", None)
+            for asset in candidate["artifacts"]:
+                asset.pop("content_hash", None)
     preview.pop("terminal_warning", None)
     artifact = preview.get("artifact")
     if isinstance(artifact, dict):

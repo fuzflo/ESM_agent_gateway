@@ -105,6 +105,7 @@ def artifacts_equivalent(expected: Artifact, actual: Artifact) -> bool:
 
 
 class Storage(Protocol):
+    async def list_all_artifacts(self) -> list[Artifact]: ...
     async def append_event(self, draft: EventDraft) -> tuple[Event, bool]: ...
 
     async def find_event_by_idempotency(
@@ -157,6 +158,9 @@ class InMemoryStorage:
         self.checkpoint_event_id: str | None = None
         self._lock = asyncio.Lock()
 
+    async def list_all_artifacts(self) -> list[Artifact]:
+        return deepcopy(list(self.artifacts.values()))
+
     async def append_event(self, draft: EventDraft) -> tuple[Event, bool]:
         async with self._lock:
             existing = next(
@@ -202,7 +206,7 @@ class InMemoryStorage:
                 causation_id=draft.causation_id,
                 idempotency_key=draft.idempotency_key,
                 command_hash=draft.command_hash,
-                schema_version="1.1.0",
+                schema_version="1.2.0" if draft.payload.get("entry_path") == "csv_import" else "1.1.0",
                 payload=deepcopy(draft.payload),
                 payload_hash=sha256_value(draft.payload),
                 artifact_reference_ids=list(draft.artifact_reference_ids),

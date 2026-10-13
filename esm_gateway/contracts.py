@@ -51,7 +51,8 @@ STAGE_STATUSES = frozenset(
 )
 SELF_ONBOARDING_VALUES = frozenset({"yes", "no", "unsure"})
 PIPELINE_TRACK_VALUES = frozenset({"expert_led", "esm_led", "hybrid"})
-SOURCE_VALUES = frozenset({"inbound", "esm_outbound"})
+SOURCE_VALUES = frozenset({"inbound", "esm_outbound", "ordinary_inbound", "important_inbound"})
+STAGE_STATUSES = STAGE_STATUSES | {"awaiting_progress_assessment"}
 PROFESSIONAL_DOMAIN_VALUES = frozenset(
     {
         "marketing",
@@ -141,6 +142,7 @@ ARTIFACT_TYPES: dict[str, frozenset[str]] = {
     ),
     "expert_conversation_link": frozenset({"source"}),
     "expert_agent_link": frozenset({"source"}),
+    "leapility_card_link": frozenset({"source"}),
     "positioning_call_prep": frozenset(
         {"ai_draft", "human_supplement", "reviewed_final"}
     ),
@@ -190,6 +192,7 @@ STAGE_ARTIFACT_TYPES: dict[str, frozenset[str]] = {
         {
             "expert_conversation_link",
             "expert_agent_link",
+            "leapility_card_link",
             "positioning_call_prep",
             "positioning_call_transcript",
             "positioning_call_notes",
@@ -216,6 +219,9 @@ EVENT_PAYLOAD_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
                 "sourcing_run_id",
                 "skipped_stages",
                 "trusted_entry_reason_short",
+                "primary_contact_email", "acquisition_campaign", "primary_public_profile_url",
+                "admin_import_note_short", "expert_agent_artifact_id", "leapility_card_artifact_id",
+                "csv_template_version", "import_batch_id", "import_row_id", "source_row", "row_fingerprint",
             }
         ),
     ),
@@ -348,7 +354,7 @@ def validate_event_payload(event_type: str, payload: dict[str, Any]) -> None:
         require_short(payload.get("expert_name"), "expert_name")
         if payload.get("source") not in SOURCE_VALUES:
             raise ContractError("COMMAND_PAYLOAD_INVALID")
-        if payload.get("entry_path") not in {"standard", "trusted_direct"}:
+        if payload.get("entry_path") not in {"standard", "trusted_direct", "csv_import"}:
             raise ContractError("COMMAND_PAYLOAD_INVALID")
         for field_name in ("professional_domains", "market_regions"):
             if not isinstance(payload.get(field_name), list):
@@ -362,6 +368,33 @@ def validate_event_payload(event_type: str, payload: dict[str, Any]) -> None:
                 raise ContractError("COMMAND_PAYLOAD_INVALID")
             require_short(payload.get("trusted_entry_reason_short"), "trusted_entry_reason_short")
         elif "skipped_stages" in payload or "trusted_entry_reason_short" in payload:
+            raise ContractError("COMMAND_PAYLOAD_INVALID")
+        csv_fields = {"primary_contact_email", "acquisition_campaign", "primary_public_profile_url",
+                      "admin_import_note_short", "expert_agent_artifact_id", "leapility_card_artifact_id",
+                      "csv_template_version", "import_batch_id", "import_row_id", "source_row", "row_fingerprint"}
+        if payload["entry_path"] == "csv_import":
+            if not csv_fields.issubset(keys) or payload["csv_template_version"] != "1.2.0":
+                raise ContractError("CSV_PAYLOAD_INCOMPLETE")
+            from .csv_import import valid_url
+            if payload["source"] not in {"ordinary_inbound", "important_inbound"} or "emea" in payload["market_regions"]:
+                raise ContractError("COMMAND_PAYLOAD_INVALID")
+            require_short(payload["expert_name"], "expert_name", maximum=100)
+            for name, maximum in (("primary_contact_email", 254), ("acquisition_campaign", 200),
+                                  ("admin_import_note_short", 280), ("primary_public_profile_url", 2000)):
+                if payload[name] is not None:
+                    require_short(payload[name], name, maximum=maximum)
+            if payload["primary_public_profile_url"] and not valid_url(payload["primary_public_profile_url"]):
+                raise ContractError("COMMAND_PAYLOAD_INVALID")
+            if payload["primary_contact_email"] and not re.fullmatch(r"[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+", payload["primary_contact_email"]):
+                raise ContractError("COMMAND_PAYLOAD_INVALID")
+            for name in ("import_batch_id", "import_row_id", "row_fingerprint"):
+                require_short(payload[name], name)
+            if type(payload["source_row"]) is not int or payload["source_row"] < 3:
+                raise ContractError("COMMAND_PAYLOAD_INVALID")
+            for name in ("expert_agent_artifact_id", "leapility_card_artifact_id"):
+                if payload[name] is not None:
+                    require_short(payload[name], name)
+        elif keys & csv_fields or payload["source"] not in {"inbound", "esm_outbound"}:
             raise ContractError("COMMAND_PAYLOAD_INVALID")
     elif event_type == "expert_profile_updated":
         if not any(
@@ -501,7 +534,7 @@ class Event:
         payload_artifact_ids = {
             value
             for key, value in self.payload.items()
-            if key == "artifact_id" and isinstance(value, str)
+            if key in {"artifact_id", "expert_agent_artifact_id", "leapility_card_artifact_id"} and isinstance(value, str)
         }
         if not payload_artifact_ids.issubset(set(self.artifact_reference_ids)):
             raise ContractError("EVENT_ARTIFACT_REFERENCE_MISMATCH")
@@ -628,7 +661,7 @@ class Artifact:
             raise ContractError("ARTIFACT_STORAGE_TYPE_UNSUPPORTED_V1")
         if self.content_page_or_object_id is not None:
             raise ContractError("ARTIFACT_OBJECT_ID_UNSUPPORTED_V1")
-        if self.artifact_schema_version != "1.1.0":
+        if self.artifact_schema_version not in {"1.0.0", "1.1.0", "1.2.0"}:
             raise ContractError("ARTIFACT_SCHEMA_VERSION_UNSUPPORTED")
         if self.version_role == "ai_draft":
             has_source_execution_id = bool(self.source_execution_id)

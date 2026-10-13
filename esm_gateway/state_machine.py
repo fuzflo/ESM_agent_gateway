@@ -92,6 +92,14 @@ def reduce_event(state: ExpertState | None, event: Event) -> ExpertState:
                 "created_at": event.occurred_at,
             },
         )
+        if payload["entry_path"] == "csv_import":
+            created.current_stage = "agent_positioning"
+            created.stage_status = "awaiting_progress_assessment"
+            created.next_action = "Owner 核对资料并确认正常排期"
+            created.requires_esm_confirmation = True
+            created.values["primary_public_profile_url"] = payload["primary_public_profile_url"]
+            created.values["expert_agent_artifact_id"] = payload["expert_agent_artifact_id"]
+            created.values["expert_agent_access_status"] = "not_checked" if payload["expert_agent_artifact_id"] else "not_provided"
         return _finish(created, event)
     if state is None:
         raise StateTransitionError("APPLICATION_NOT_FOUND")
