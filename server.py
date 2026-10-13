@@ -38,12 +38,14 @@ from esm_gateway.service import ESMGatewayService
 from esm_gateway.util import utc_text
 
 
-GATEWAY_VERSION = "1.1.10"
+GATEWAY_VERSION = "1.2.0"
 GATEWAY_INSTANCE_ID = str(uuid.uuid4())
 MCP_PATH = os.environ.get("MCP_PATH", "/mcp")
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")  # noqa: S104
 PUBLIC_PATHS = frozenset({"/", "/healthz"})
 TOOL_ARGUMENTS = {
+    "validate_csv_import": {"esm_test_code", "csv_text"},
+    "get_csv_import_status": {"esm_test_code", "import_batch_id"},
     "verify_esm_test_code": {"esm_test_code"},
     "get_esm_roster": {"esm_test_code"},
     "get_expert_snapshot": {"esm_test_code", "expert_name", "temp_application_id"},
@@ -186,7 +188,7 @@ async def safe_call(
         return _failure(exc.result_code)
     except (ContractError, StateTransitionError) as exc:
         logger.warning("gateway_request_rejected error_code=%s", exc.result_code)
-        return _failure(exc.result_code)
+        return _failure(exc.result_code, message=exc.safe_message)
     except ConfigurationError as exc:
         logger.error("gateway_configuration_failed error_code=%s", exc.result_code)
         return _failure("GATEWAY_CONFIGURATION_ERROR")
@@ -278,7 +280,7 @@ mcp = StrictESMMCPServer(
     title="ESM Agent V1.1 Gateway",
     version=GATEWAY_VERSION,
     instructions=(
-        "One controlled ESM V1.1 endpoint. Verify the test code first and wait for "
+        "One controlled ESM V1.2 endpoint. Verify the test code first and wait for "
         "ESM_IDENTITY_VERIFIED before any snapshot or write tool. Formal writes always "
         "use prepare_write followed by the user's exact confirmation and confirm_write."
     ),
@@ -333,6 +335,18 @@ async def get_expert_snapshot(
 
 
 @mcp.tool()
+async def validate_csv_import(esm_test_code: ESMTestCode, csv_text: str) -> dict[str, Any]:
+    """Admin only. Parse original CSV text; show valid, duplicate and erroneous rows. No writes."""
+    return await safe_call(lambda service: service.validate_csv_import(raw_code=esm_test_code, csv_text=csv_text))
+
+
+@mcp.tool()
+async def get_csv_import_status(esm_test_code: ESMTestCode, import_batch_id: str) -> dict[str, Any]:
+    """Admin only. Read batch results; never restart writes."""
+    return await safe_call(lambda service: service.get_csv_import_status(raw_code=esm_test_code, import_batch_id=import_batch_id))
+
+
+@mcp.tool()
 async def prepare_write(
     esm_test_code: ESMTestCode,
     source_session_id: SourceSessionID,
@@ -340,7 +354,9 @@ async def prepare_write(
         dict[str, Any],
         Field(
             description=(
-                "A closed V1.1 command object; unknown command fields are rejected. "
+                "A closed V1.2 command object; unknown command fields are rejected. "
+                "For import_experts_csv_batch, send complete original csv_text, selected_source_rows "
+                "and acknowledged_same_name_rows. IDs and titles are bound by the server. "
                 "For batch commands, professional_domains must use one or more of "
                 "marketing, sales, gtm, international_trade, cross_border_ecommerce, "
                 "product, operations, people_hr, finance, legal, healthcare, technology, "
