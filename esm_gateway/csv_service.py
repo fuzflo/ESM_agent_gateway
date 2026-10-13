@@ -7,6 +7,7 @@ from dataclasses import asdict
 
 from .contracts import Artifact, validate_event_payload
 from .csv_import import HEADERS, URL_FIELDS, normalize_url, parse_csv, validate_row
+from .csv_report import build_report
 from .errors import AuthorizationError, ContractError, GatewayError, PersistenceError
 from .storage import EventDraft, artifacts_equivalent
 from .util import new_id, new_temp_application_id, sha256_value, utc_text
@@ -142,10 +143,92 @@ class CSVImportService:
             candidate["payload"] = self._csv_payload(candidate, batch_id)
             validate_event_payload("application_created", candidate["payload"])
             candidates.append(candidate)
+        # Keep excluded rows too. Selection-scoped duplicate checks must not erase
+        # their original validation reasons from the final full-file report.
+        all_checked = await self._csv_validate(command["csv_text"])
+        if all_checked["status"] != "success":
+            raise ContractError("CSV_CHECK_INCOMPLETE")
         return {"command_type": "import_experts_csv_batch", "skill": "esm-gateway-contract",
                 "subject": batch_id, "import_batch_id": batch_id, "csv_text": command["csv_text"],
+                "all_rows": all_checked["rows"], "import_actor_id": identity.esm_owner_id,
                 "acknowledged_same_name_rows": acknowledged, "selected_source_rows": sorted(selected),
                 "excluded_source_rows": sorted(set(by_row) - set(selected)), "candidates": candidates}, []
+
+    async def _check_retry_records(self, candidates, context, expected_revision=None):
+        # Absence is only an extra check: eligibility already requires a known
+        # no-commit or never-started result, never an unknown/timeout result.
+        events, assets = await self._csv_history()
+        observed = False
+        for candidate in candidates:
+            if expected_revision is not None and (context["running"] or context["revision"] != expected_revision):
+                raise ContractError("CSV_RETRY_STATE_CHANGED")
+            own_events = [e for e in events if e.temp_application_id == candidate["temp_application_id"]]
+            own_assets = [a for a in assets if a.temp_application_id == candidate["temp_application_id"]]
+            if not own_events and not own_assets:
+                continue
+            observed = True
+            result = next(r for r in context["results"] if r["source_row"] == candidate["source_row"])
+            event = next((e for e in own_events if e.idempotency_key == candidate["import_row_id"] + ":create"), None)
+            if event:
+                result.update(event_id=event.event_id, event_commit_observed=True,
+                              result_status="committed_pending", result_code="CSV_COMMIT_OBSERVED")
+                await self._csv_readback(candidate, event, result)
+            else:
+                result.update(result_status="maintenance_required", result_code="CSV_RETRY_RECORD_CONFLICT")
+        if observed:
+            raise ContractError("CSV_RETRY_RECORD_EXISTS", "原标识下已有记录，须核实，不能重新创建。")
+
+    async def _normalize_csv_retry(self, identity, command):
+        if not identity.is_admin:
+            raise AuthorizationError("ADMIN_ROLE_REQUIRED")
+        if set(command) - {"command_type", "import_batch_id", "selected_source_rows", "acknowledged_same_name_rows"}:
+            raise ContractError("COMMAND_PAYLOAD_INVALID")
+        batch_id = command.get("import_batch_id")
+        if not isinstance(batch_id, str):
+            raise ContractError("CSV_BATCH_ID_INVALID")
+        context = self._csv_batches.get(batch_id)
+        if context is None:
+            raise ContractError("CSV_CONTEXT_UNAVAILABLE", "可信批次上下文不可恢复，只能核实结果或交维护者。")
+        original = context["command"]
+        if original["import_actor_id"] != identity.esm_owner_id:
+            raise AuthorizationError("CSV_BATCH_IDENTITY_MISMATCH")
+        if context["running"]:
+            raise ContractError("CSV_BATCH_RUNNING")
+        revision = context["revision"]
+        selected = command.get("selected_source_rows")
+        ack = command.get("acknowledged_same_name_rows", [])
+        for value in (selected, ack):
+            if not isinstance(value, list) or any(type(n) is not int for n in value) or len(set(value)) != len(value):
+                raise ContractError("CSV_ROW_SELECTION_INVALID")
+        if not selected or not set(ack).issubset(selected):
+            raise ContractError("CSV_ROW_SELECTION_INVALID")
+        results = {r["source_row"]: r for r in context["results"]}
+        if any(n not in results or results[n]["result_status"] not in {"failed_no_commit", "not_started"} for n in selected):
+            raise ContractError("CSV_ROW_NOT_RETRYABLE")
+        candidates = [deepcopy(c) for c in original["candidates"] if c["source_row"] in selected]
+        await self._check_retry_records(candidates, context, expected_revision=revision)
+        checked = await self._csv_validate(original["csv_text"], set(selected))
+        if checked["status"] != "success":
+            raise ContractError("CSV_CHECK_INCOMPLETE")
+        acknowledged = sorted(set(original["acknowledged_same_name_rows"]) | set(ack))
+        by_row = {r["source_row"]: r for r in checked["rows"]}
+        for candidate in candidates:
+            row = by_row[candidate["source_row"]]
+            fingerprint = sha256_value({"values": row["values"], "owner": row["owner_display_name"], "titles": row["asset_titles"]})
+            if fingerprint != candidate["row_fingerprint"]:
+                raise ContractError("CSV_RETRY_CONTENT_CHANGED")
+            if row["errors"] or row["duplicates"]:
+                raise ContractError("CSV_SELECTED_ROW_INVALID")
+            if "same_name" in row["warnings"] and row["source_row"] not in acknowledged:
+                raise ContractError("CSV_SAME_NAME_ACK_REQUIRED")
+        if context["running"] or context["revision"] != revision:
+            raise ContractError("CSV_RETRY_STATE_CHANGED")
+        normalized = deepcopy(original)
+        normalized.update(command_type="retry_csv_import_batch", candidates=candidates,
+                          selected_source_rows=sorted(selected), expected_revision=revision,
+                          acknowledged_same_name_rows=acknowledged,
+                          excluded_source_rows=sorted({r["source_row"] for r in original["all_rows"]} - set(selected)))
+        return normalized, []
 
     def _csv_assets(self, identity, candidate):
         assets = []
@@ -185,9 +268,23 @@ class CSVImportService:
             raise AuthorizationError("ADMIN_ROLE_REQUIRED")
         command = claims["command"]
         batch_id = command["import_batch_id"]
-        # A consumed card cannot restart this batch; status queries are read-only.
-        context = {"command": deepcopy(command), "results": [], "running": True}
-        self._csv_batches[batch_id] = context
+        # Reserve synchronously before the first await; two sessions cannot
+        # launch overlapping attempts or reuse a stale retry preview.
+        if command["command_type"] == "retry_csv_import_batch":
+            context = self._csv_batches.get(batch_id)
+            if context is None:
+                raise ContractError("CSV_CONTEXT_UNAVAILABLE")
+            if context["running"] or context["revision"] != command["expected_revision"]:
+                raise ContractError("CSV_RETRY_STATE_CHANGED")
+            results = {r["source_row"]: r for r in context["results"]}
+            if any(results[c["source_row"]]["result_status"] not in {"failed_no_commit", "not_started"} for c in command["candidates"]):
+                raise ContractError("CSV_ROW_NOT_RETRYABLE")
+            context["revision"] += 1
+            context["running"] = True
+            context.pop("error_code", None)
+        else:
+            context = {"command": deepcopy(command), "results": [], "running": True, "revision": 0}
+            self._csv_batches[batch_id] = context
         task = asyncio.create_task(self._run_csv_locked(identity, session, claims, context))
         context["task"] = task
         self.confirmations.mark_consumed(session, str(claims["confirmation_id"]))
@@ -202,21 +299,28 @@ class CSVImportService:
             await self._run_csv(identity, session, claims, context)
 
     async def _run_csv(self, identity, session, claims, context):
-        command = context["command"]
+        command = claims["command"]
         candidates = command["candidates"]
         pending = []
         try:
+            if command["command_type"] == "retry_csv_import_batch":
+                await self._check_retry_records(candidates, context)
             check = await self._csv_validate(command["csv_text"], set(command["selected_source_rows"]))
             if check["status"] != "success":
                 raise ContractError("CSV_CHECK_INCOMPLETE")
             rows = {r["source_row"]: r for r in check["rows"]}
             stopped = False
             for candidate in candidates:
-                result = self._csv_row_result(candidate)
-                context["results"].append(result)
                 if stopped:
                     continue
+                result = self._csv_row_result(candidate)
+                context["results"] = [r for r in context["results"] if r["source_row"] != candidate["source_row"]]
+                context["results"].append(result)
                 row = rows[candidate["source_row"]]
+                fingerprint = sha256_value({"values": row["values"], "owner": row["owner_display_name"], "titles": row["asset_titles"]})
+                if fingerprint != candidate["row_fingerprint"]:
+                    result.update(result_status="validation_error", result_code="CSV_CONTENT_CHANGED")
+                    continue
                 if row["errors"] or row["duplicates"] or ("same_name" in row["warnings"] and row["source_row"] not in command["acknowledged_same_name_rows"]):
                     result.update(result_status="duplicate_blocked" if row["duplicates"] else "validation_error",
                                   result_code="CSV_CONFIRM_CONFLICT", reasons=row["errors"] + row["duplicates"] + row["warnings"])
@@ -264,6 +368,8 @@ class CSVImportService:
                     result.update(result_status=state, result_code=exc.result_code)
                     if isinstance(exc, PersistenceError):
                         result["event_commit_acknowledged"] = False if phase == "artifact_create" else exc.event_commit_acknowledged
+                        if state == "failed_no_commit":
+                            result["event_commit_acknowledged"] = False
                         result["failed_phase"] = exc.failed_phase or phase
                         stopped = True
             if pending:
@@ -279,12 +385,15 @@ class CSVImportService:
                 if result["result_status"] == "result_unverified":
                     result["result_code"] = code
         finally:
+            present = {r["source_row"] for r in context["results"]}
+            context["results"].extend(self._csv_row_result(c) for c in candidates if c["source_row"] not in present)
             context["running"] = False
 
     def _csv_row_result(self, candidate):
         return {"source_row": candidate["source_row"], "expert_name": candidate["values"]["expert_name"],
                 "esm_owner_id": candidate["values"]["esm_owner_id"], "esm_owner_display_name": candidate["owner_display_name"],
                 "temp_application_id": candidate["temp_application_id"], "import_row_id": candidate["import_row_id"],
+                "has_assets": bool(candidate["artifacts"]),
                 "result_status": "not_started", "result_code": "CSV_NOT_STARTED", "event_id": None,
                 "event_commit_acknowledged": False, "artifact_commit_acknowledged": None,
                 "event_readback_verified": False, "artifact_readback_verified": False,
@@ -359,10 +468,31 @@ class CSVImportService:
         counts = {}
         for r in results:
             counts[r["result_status"]] = counts.get(r["result_status"], 0) + 1
-        return {"status": "pending" if context["running"] or counts.get("committed_pending") else "success" if counts.get("success") == len(results) else "partial_failure",
+        all_results = {r["source_row"]: r for r in results}
+        for row in context["command"]["all_rows"]:
+            if row["source_row"] in all_results:
+                continue
+            state = "validation_error" if row["errors"] else "duplicate_blocked" if row["duplicates"] else "not_selected"
+            all_results[row["source_row"]] = {"source_row": row["source_row"], "expert_name": row["values"]["expert_name"],
+                "esm_owner_id": row["values"]["esm_owner_id"], "esm_owner_display_name": row["owner_display_name"],
+                "result_status": state, "result_code": {"validation_error": "CSV_VALIDATION_ERROR", "duplicate_blocked": "CSV_DUPLICATE_BLOCKED", "not_selected": "CSV_NOT_SELECTED"}[state],
+                "temp_application_id": None, "reasons": row["errors"] + row["duplicates"],
+                "has_assets": bool(row["values"]["expert_agent_url"] or row["values"]["leapility_card_url"])}
+        report_rows = sorted(all_results.values(), key=lambda r: r["source_row"])
+        report_error = None
+        try:
+            report = build_report(batch_id, report_rows, selected_count=len(context["command"]["candidates"]),
+                                  running=context["running"], revision=context["revision"])
+        except Exception:
+            # Document formatting must never disguise a committed database write
+            # as a failed import. The same status call can regenerate the report.
+            report = None
+            report_error = "CSV_REPORT_UNAVAILABLE"
+        return {"status": "pending" if context["running"] or counts.get("committed_pending") or counts.get("result_unverified") else "success" if counts.get("success") == len(results) else "partial_failure",
                 "result_code": "CSV_IMPORT_RESULT", "identity_verified": True, "credential_material_returned": False,
                 "import_batch_id": batch_id, "coverage": "complete", "running": context["running"],
                 "results": sorted(results, key=lambda r: r["source_row"]), "counts": counts,
+                "report_rows": report_rows, "report": report, "report_error": report_error,
                 "excluded_source_rows": context["command"]["excluded_source_rows"], "error_code": context.get("error_code")}
 
     async def get_csv_import_status(self, *, raw_code, import_batch_id):

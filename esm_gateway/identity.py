@@ -76,9 +76,13 @@ class IdentityDirectory:
     def verify(self, raw_code: str) -> Identity | None:
         if not isinstance(raw_code, str) or not raw_code:
             return None
+        try:
+            supplied = raw_code.encode("utf-8")
+        except UnicodeEncodeError:
+            return None
         matched: Identity | None = None
         for expected, identity in self._by_code.items():
-            if hmac.compare_digest(raw_code, expected):
+            if hmac.compare_digest(supplied, expected.encode("utf-8")):
                 matched = identity
         return matched
 

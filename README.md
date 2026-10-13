@@ -1,14 +1,18 @@
-# ESM Gateway V1.2 — CSV 第一阶段
+# ESM Gateway V1.2.1
 
-本地验证：2026-10-13，`python3 -m unittest discover -s tests -q` 共 89 个测试通过（含真实 MCP 工具注册与闭合参数合同测试、20 个新增 CSV 用例）。未调用生产服务。
+2026-10-13 本地完整回归：127 个测试通过，无跳过；没有调用生产服务。运行版本 1.2.1，Event / Artifact / 投影 schema 仍为 1.2.0。
 
-本目录复制自 V1.1.10，V1.1 保留。本阶段实现 Admin CSV 校验、预览与确认导入，仍为本地开发版本，尚未上线。新增 MCP 工具 `validate_csv_import` 和 `get_csv_import_status`；`prepare_write` 新增 `import_experts_csv_batch`，具体调用见 [CSV 合同](../esm-agent-v1.2/skills/esm-gateway-contract/references/csv-import.md)。
+本次新增 `prepare_write` command `retry_csv_import_batch`，使用服务端原批次上下文和原内部标识，重新预览、精确确认后执行；通过批次执行版本防止并发和旧卡重入。已提交、未知、部分提交或上下文丢失不能重建。
 
-已实现 12 列解析、字段／Owner 校验、历史及文件内重复检查、同名确认、完整创建 Event 和两类资产、独立回读核验、异步投影与文字回执。受控失败行重试、Owner 查询扩展／首次排期确认、回执 CSV 下载尚未实现；平台附件能力和生产 Notion 写入尚未验收。完整阶段边界见 [编码进度](../esm-agent-v1.2/operations/V1.2-编码进度.md)。
+`confirm_write` / `get_csv_import_status` 新增 `report_rows` 和 `report`。`report.counts` 覆盖原文件全部行，旧 `results/counts` 仍只覆盖原确认范围。报告为安全转义的 Markdown，供 Agent 呈现及 Admin 手动保存平台云文档。报告生成失败返回 report_error=CSV_REPORT_UNAVAILABLE，保留真实写入结果。
 
-上线前需要在维护窗口使 Notion 精确枚举与本目录 `notion.py` 匹配，包括 source 新选项、awaiting_progress_assessment、leapility_card_link、checkpoint 的 1.2.0 支持版本。没有自动修改 schema 的代码；旧 V1.1 直接回退可能无法通过新增 schema，回退构建尚待准备。
+原 CSV 解析、资产和 Event 保存、独立核验、Worker、Owner 查询和核对推进继续保留。中文错误测试码稳定返回 IDENTITY_DENIED。接口见 [CSV 合同](../esm-agent-v1.2/skills/esm-gateway-contract/references/csv-import.md)。
 
-以下为继承的 V1.1 运维说明；历史版本说明保留用于说明兼容行为，部署时服务根目录使用 esm-gateway-v1.2。
+本次未改生产 Notion schema，未上传 GitHub 或部署 Railway。环境验收与回退步骤见 [收尾验收](../esm-agent-v1.2/operations/V1.2-收尾验收.md)，交付与回退源码见 [交付包](../artifacts/v1.2-completion-20261013/README.md)。原批次上下文仍在内存，重启后不保证完整报告或继续未提交行。
+
+本地验证：在本目录执行 `../.venv/bin/python -m unittest discover -s tests -v`。生产部署服务根目录为 esm-gateway-v1.2，仍保持单 replica；相对已部署 Owner 扩展无需新 schema，但必须核实线上实际版本与精确枚举。
+
+以下为继承的 V1.1 架构和运维说明；历史部署路径与版本不代表当前发布配置。
 
 # ESM Gateway V1.1
 

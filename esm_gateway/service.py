@@ -44,7 +44,7 @@ from .util import (
 
 
 SUPPORTED_COMMAND_TYPES = frozenset(
-    {"create_standard_batch", "create_trusted_batch", "business_event", "admin_review", "import_experts_csv_batch"}
+    {"create_standard_batch", "create_trusted_batch", "business_event", "admin_review", "import_experts_csv_batch", "retry_csv_import_batch"}
 )
 CORRECTABLE_EVENT_TYPES = frozenset(
     {
@@ -290,7 +290,7 @@ class ESMGatewayService(CSVImportService):
             token=confirmation_token, phrase=confirmation_phrase,
             identity_id=identity.esm_owner_id, source_session_id=source_session_id,
         )
-        if claims["command"]["command_type"] == "import_experts_csv_batch":
+        if claims["command"]["command_type"] in {"import_experts_csv_batch", "retry_csv_import_batch"}:
             return await self._confirm_csv(identity, source_session_id, claims)
         async with self._write_lock:
             claims = self.confirmations.verify(
@@ -324,6 +324,8 @@ class ESMGatewayService(CSVImportService):
         command_type = command["command_type"]
         if command_type == "import_experts_csv_batch":
             return await self._normalize_csv(identity, command)
+        if command_type == "retry_csv_import_batch":
+            return await self._normalize_csv_retry(identity, command)
         if command_type in {"create_standard_batch", "create_trusted_batch"}:
             return await self._normalize_batch(identity, command)
         if command_type == "business_event":
@@ -1281,8 +1283,11 @@ def _bind_artifact_payload(
 
 def _public_preview(command: dict[str, Any]) -> dict[str, Any]:
     preview = deepcopy(command)
-    if command["command_type"] == "import_experts_csv_batch":
+    if command["command_type"] in {"import_experts_csv_batch", "retry_csv_import_batch"}:
         preview.pop("csv_text", None)
+        preview.pop("all_rows", None)
+        preview.pop("expected_revision", None)
+        preview.pop("import_actor_id", None)
         for candidate in preview["candidates"]:
             candidate.pop("payload", None)
             for asset in candidate["artifacts"]:
