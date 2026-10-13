@@ -222,6 +222,12 @@ def reduce_event(state: ExpertState | None, event: Event) -> ExpertState:
         result.next_action = payload["next_action"]
     elif event_type == "discovery_outcome_confirmed":
         _apply_discovery_outcome(result, payload, event.artifact_reference_ids)
+    elif event_type == "positioning_progress_assessed":
+        _require(result, "agent_positioning", {"awaiting_progress_assessment"})
+        if event.actor_id != result.esm_owner_id or event.actor_type not in {"esm", "admin"}:
+            raise StateTransitionError("EXPERT_WRITE_FORBIDDEN_OWNER_MISMATCH")
+        _enter(result, "agent_positioning", "awaiting_schedule")
+        result.next_action = "联系专家安排 Positioning Call"
     elif event_type == "positioning_call_scheduled":
         _require(result, "agent_positioning", {"awaiting_schedule"})
         result.values["positioning_scheduled_at"] = payload["scheduled_at"]

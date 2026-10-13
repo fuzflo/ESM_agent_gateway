@@ -311,6 +311,9 @@ EVENT_PAYLOAD_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
         frozenset({"scheduled_at"}),
         frozenset({"calendar_reference"}),
     ),
+    "positioning_progress_assessed": (
+        frozenset({"profile_reviewed", "target_status"}), frozenset(),
+    ),
     "positioning_call_completed": (frozenset({"completed_at"}), frozenset()),
     "positioning_source_registered": (
         frozenset({"artifact_id", "source_type"}),
@@ -395,6 +398,9 @@ def validate_event_payload(event_type: str, payload: dict[str, Any]) -> None:
                 if payload[name] is not None:
                     require_short(payload[name], name)
         elif keys & csv_fields or payload["source"] not in {"inbound", "esm_outbound"}:
+            raise ContractError("COMMAND_PAYLOAD_INVALID")
+    elif event_type == "positioning_progress_assessed":
+        if payload["profile_reviewed"] is not True or payload["target_status"] != "awaiting_schedule":
             raise ContractError("COMMAND_PAYLOAD_INVALID")
     elif event_type == "expert_profile_updated":
         if not any(

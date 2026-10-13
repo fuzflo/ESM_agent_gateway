@@ -206,7 +206,7 @@ class InMemoryStorage:
                 causation_id=draft.causation_id,
                 idempotency_key=draft.idempotency_key,
                 command_hash=draft.command_hash,
-                schema_version="1.2.0" if draft.payload.get("entry_path") == "csv_import" else "1.1.0",
+                schema_version="1.2.0" if draft.payload.get("entry_path") == "csv_import" or draft.event_type == "positioning_progress_assessed" else "1.1.0",
                 payload=deepcopy(draft.payload),
                 payload_hash=sha256_value(draft.payload),
                 artifact_reference_ids=list(draft.artifact_reference_ids),

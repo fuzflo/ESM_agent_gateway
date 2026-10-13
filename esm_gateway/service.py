@@ -9,6 +9,7 @@ from typing import Any
 
 from .confirmation import CONFIRMATION_PHRASE, ConfirmationService
 from .csv_service import CSVImportService
+from .owner_snapshot import extend_owner_snapshot
 from .contracts import (
     MARKET_REGION_VALUES,
     PROFESSIONAL_DOMAIN_VALUES,
@@ -98,6 +99,7 @@ SKILL_EVENT_TYPES: dict[str, frozenset[str]] = {
     ),
     "expert-positioning": frozenset(
         {
+            "positioning_progress_assessed",
             "stage_processing_started",
             "stage_ai_draft_generated",
             "stage_review_requested",
@@ -195,6 +197,7 @@ class ESMGatewayService(CSVImportService):
             return self._success("CROSS_OWNER_LIMITED_SNAPSHOT", identity, snapshot=snapshot)
         record = state.as_record()
         allowed = {
+            "esm_owner_id", "esm_owner_display_name", "primary_public_profile_url",
             "expert_name",
             "temp_application_id",
             "source",
@@ -231,21 +234,7 @@ class ESMGatewayService(CSVImportService):
             "first_kit_direction_short",
         }
         snapshot = {key: value for key, value in record.items() if key in allowed}
-        artifacts = await self.storage.find_artifacts(
-            temp_application_id=state.temp_application_id
-        )
-        snapshot["artifact_versions"] = [
-            {
-                "artifact_id": artifact.artifact_id,
-                "artifact_type": artifact.artifact_type,
-                "version_role": artifact.version_role,
-                "artifact_version": artifact.artifact_version,
-                "artifact_status": artifact.artifact_status,
-                "link_access_status": artifact.link_access_status,
-            }
-            for artifact in artifacts
-            if artifact.artifact_status == "active"
-        ]
+        await extend_owner_snapshot(self, state, snapshot)
         return self._success("OWNER_FULL_SNAPSHOT", identity, snapshot=snapshot)
 
     async def prepare_write(
@@ -505,6 +494,11 @@ class ESMGatewayService(CSVImportService):
         if state.stage_status in {"closed", "canceled", "completed"}:
             raise StateTransitionError("APPLICATION_TERMINAL_V1")
         event_type = _required_text(command.get("event_type"), "event_type")
+        if event_type == "positioning_progress_assessed" and (
+            command.get("artifact") is not None or command.get("reference_artifact_ids")
+            or command.get("target_event_id") is not None
+        ):
+            raise ContractError("POSITIONING_REVIEW_METADATA_FORBIDDEN")
         skill = _required_text(command.get("skill"), "skill")
         if event_type not in SKILL_EVENT_TYPES.get(skill, frozenset()):
             raise AuthorizationError("SKILL_EVENT_COMBINATION_FORBIDDEN")
@@ -785,6 +779,15 @@ class ESMGatewayService(CSVImportService):
         reference_artifact_ids: list[str],
         target_event_id: str | None,
     ) -> None:
+        if event_type == "positioning_progress_assessed":
+            stream = await self.storage.stream_events(state.temp_application_id)
+            if not stream or stream[-1].stream_version != state.last_processed_stream_version:
+                raise StateTransitionError("PROJECTION_NOT_CURRENT")
+            authoritative = replay_stream(stream)
+            if (authoritative.esm_owner_id != identity.esm_owner_id
+                or authoritative.current_stage != "agent_positioning"
+                or authoritative.stage_status != "awaiting_progress_assessment"):
+                raise StateTransitionError("INVALID_STATE_TRANSITION")
         event = Event(
             event_id="EVT-PREVIEW",
             global_sequence=state.last_processed_global_sequence + 1,
@@ -980,6 +983,8 @@ class ESMGatewayService(CSVImportService):
             raise AuthorizationError("EXPERT_WRITE_FORBIDDEN_OWNER_MISMATCH")
         if state.last_processed_stream_version != command["expected_stream_version"]:
             raise StateTransitionError("STREAM_VERSION_CONFLICT")
+        if command["event_type"] == "positioning_progress_assessed":
+            await self._preview_transition(state, identity, command["event_type"], command["payload"], None, [], None)
         artifact = Artifact(**command["artifact"]) if command.get("artifact") else None
         artifact_receipt = None
         if artifact is not None:

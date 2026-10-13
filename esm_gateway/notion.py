@@ -254,7 +254,7 @@ SELECT_OPTIONS: dict[tuple[str, str], set[str]] = {
         "outreach_response_recorded", "outreach_outcome_confirmed",
         "discovery_call_scheduled", "discovery_call_completed",
         "discovery_source_registered", "discovery_outcome_confirmed",
-        "positioning_call_scheduled", "positioning_call_completed",
+        "positioning_progress_assessed", "positioning_call_scheduled", "positioning_call_completed",
         "positioning_source_registered", "positioning_outcome_confirmed",
         "onboarding_handoff_started", "onboarding_handoff_completed",
         "credits_tutorial_sent", "mvp_agent_kickoff_scheduled",
